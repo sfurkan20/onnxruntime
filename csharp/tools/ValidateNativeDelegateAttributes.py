@@ -46,10 +46,10 @@ def main():
     # no real arg. just using this to provide description as help message
     _ = arg_parser.parse_args()
 
-    printf("__file__: {__file__}")
-    print(f"Script dir: {script_dir}")
     script_dir = pathlib.Path(__file__).parent
     csharp_root = script_dir.parent
+    print(f"__file__: {__file__}")
+    print(f"Script dir: {script_dir}")
 
     managed_dir = csharp_root / "src" / "Microsoft.ML.OnnxRuntime"
     native_methods =  managed_dir / "NativeMethods.shared.cs"
