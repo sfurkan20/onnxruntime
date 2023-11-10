@@ -3,19 +3,17 @@
 # Licensed under the MIT License.
 
 import argparse
-import os
 import pathlib
 
 
-def CheckDelegateUnmanagedFunctionPointerMatch(file: pathlib.Path):
+def check_all_delegates_have_unmanaged_function_pointer_attribute(file: pathlib.Path):
     """
     Check that all 'public delegate' declarations have a matching UnmanagedFunctionPointer attribute.
-    Check is very simplistic and does not take into account comments.
     :param file: C# source file to check.
     :return: Number of errors
     """
 
-    print(f"Checking {str(file)}")
+    print(f"Checking {file!s}")
 
     errors = 0
     line_num = 0
@@ -25,7 +23,7 @@ def CheckDelegateUnmanagedFunctionPointerMatch(file: pathlib.Path):
             line_num += 1
 
             # strip so it's easier to deal with commented out lines.
-            line = line.strip()
+            line = line.strip()  # noqa
             if line.startswith("public delegate ") and not prev_line.startswith("[UnmanagedFunctionPointer"):
                 errors += 1
                 print(f"Line {line_num} is missing UnmanagedFunctionPointer attribute:\n\t{prev_line}\n\t{line}")
@@ -43,18 +41,18 @@ def main():
         "on an actual iOS device. Due to that we take extra steps to identify problems early."
     )
 
-    # no real arg. just using this to provide description as help message
+    # no real args. just using this to provide description as help message
     _ = arg_parser.parse_args()
 
-    # CI needs resolve()  __file__ is a relative path when the script is run there
+    # CI needs resolve() as __file__ is a relative path when the script is run there
     script_dir = pathlib.Path(__file__).resolve().parent
     csharp_root = script_dir.parent
 
     managed_dir = csharp_root / "src" / "Microsoft.ML.OnnxRuntime"
-    native_methods =  managed_dir / "NativeMethods.shared.cs"
+    native_methods = managed_dir / "NativeMethods.shared.cs"
     training_native_methods = managed_dir / "Training" / "NativeTrainingMethods.shared.cs"
-    errors = CheckDelegateUnmanagedFunctionPointerMatch(native_methods)
-    errors += CheckDelegateUnmanagedFunctionPointerMatch(training_native_methods)
+    errors = check_all_delegates_have_unmanaged_function_pointer_attribute(native_methods)
+    errors += check_all_delegates_have_unmanaged_function_pointer_attribute(training_native_methods)
 
     if errors:
         raise ValueError(f"{errors} errors were found. Please check output for specifics.")
