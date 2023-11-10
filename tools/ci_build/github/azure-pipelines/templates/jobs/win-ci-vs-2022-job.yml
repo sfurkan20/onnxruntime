@@ -178,7 +178,7 @@ jobs:
   - script: |
       python ValidateNativeDelegateAttributes.py
     displayName: 'Validate C# native delegates'
-      workingDirectory: '$(Build.SourcesDirectory)\csharp\tools'
+    workingDirectory: '$(Build.SourcesDirectory)\csharp\tools'
 
   - task: MSBuild@1
     displayName: 'Build C#'
