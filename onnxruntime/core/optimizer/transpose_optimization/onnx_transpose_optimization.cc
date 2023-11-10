@@ -143,26 +143,55 @@ static std::optional<std::vector<int64_t>> GetPermAttrIfValid(const api::NodeRef
   return perm;
 }
 
-/// return the DQ node if dq_output_name is produced by a DQ node
-static std::unique_ptr<api::NodeRef> GetDQIfProducingOutput(const api::GraphRef& graph,
-                                                            std::string_view dq_output_name) {
-  auto maybe_dq_node = graph.GetNodeProducingOutput(dq_output_name);
+static inline bool NormalizeAndValidateAxis(int64_t& axis, size_t rank) {
+  int64_t rank_int = gsl::narrow_cast<int64_t>(rank);
+  if (axis < 0) {
+    axis += rank_int;
+  }
+
+  return axis >= 0 && axis < rank_int;
+}
+
+/// <summary>
+/// Check if an output value has a single consumer, which could be a graph output or a node.
+/// </summary>
+/// <param name="consumer">Consumer node if the single consumer is a node.</param>
+/// <returns>True if there is a single consumer.</returns>
+static bool OutputValueHasSingleConsumer(const api::GraphRef& graph, const api::NodeRef& node, size_t output_idx,
+                                         std::unique_ptr<api::NodeRef>& consumer) {
+  auto value = node.Outputs()[output_idx];
+  auto consumers = graph.GetValueConsumers(value);
+  bool is_graph_output = graph.IsGraphOutput(value);
+
+  bool single_consumer = consumers->comprehensive && ((consumers->nodes.size() == 1 && !is_graph_output) ||
+                                                      (consumers->nodes.empty() && is_graph_output));
+
+  if (single_consumer && !consumers->nodes.empty()) {
+    consumer = std::move(consumers->nodes[0]);
+  }
+
+  return single_consumer;
+}
+
+/// return the DQ node if value_name is produced by a DQ node
+static std::unique_ptr<api::NodeRef> GetDQIfProducingValue(const api::GraphRef& graph, std::string_view value_name) {
+  auto maybe_dq_node = graph.GetNodeProducingOutput(value_name);
 
   return (maybe_dq_node && maybe_dq_node->OpType() == "DequantizeLinear") ? std::move(maybe_dq_node)
                                                                           : std::unique_ptr<api::NodeRef>();
 }
 
 /// <summary>
-/// Return a DequantizeLinear node if it's input is a constant initializer with known consumers.
+/// Return a DequantizeLinear node if it's input is a constant initializer and it has a single consumer.
 /// In this case the initializer can be updated in-place by UnsqueezeInput or TransposeInput.
 /// </summary>
 /// <param name="graph">Current graph</param>
-/// <param name="dq_output_name">Value to check if produced by a DQ node who's input is a constant initializer</param>
+/// <param name="value_name">Value to check if produced by a DQ node who's input is a constant initializer</param>
 /// <returns>NodeRef for DQ node if it meets the requirements.</returns>
-static std::unique_ptr<api::NodeRef> GetDQWithConstInitializerInput(const api::GraphRef& graph,
-                                                                    std::string_view dq_output_name) {
+static std::unique_ptr<api::NodeRef> GetDQWithConstInitializerInputAndSingleConsumer(const api::GraphRef& graph,
+                                                                                     std::string_view value_name) {
   std::unique_ptr<api::NodeRef> result;
-  auto dq_node = GetDQIfProducingOutput(graph, dq_output_name);
+  auto dq_node = GetDQIfProducingValue(graph, value_name);
 
   if (dq_node) {
     do {
@@ -188,13 +217,10 @@ static std::unique_ptr<api::NodeRef> GetDQWithConstInitializerInput(const api::G
         break;
       }
 
-      // DQ output is only used by the node we're modifying.
       std::unique_ptr<api::NodeRef> consumer;
       if (!OutputValueHasSingleConsumer(graph, *dq_node, 0, consumer)) {
         break;
       }
-
-      assert(consumer && consumer->Id() == dq_node->Id());
 
       result = std::move(dq_node);
     } while (false);
@@ -292,109 +318,24 @@ static bool InsertQDQPair(api::GraphRef& graph, const api::NodeRef& dq_node, api
 }
 
 /// <summary>
-/// Insert Q -> DQ nodes after each node added between dq_input_node and orig_node when updating an input.
-/// TransposeInputImpl may optionally insert an Unsqueeze if the input is broadcast, and a Transpose.
-/// PermuteInput inserts a Gather
+/// Insert Q -> DQ nodes after each node added between dq_input_node and orig_node when transpose optimizer was
+/// updating an input, or to fix a QDQ node unit when the Tranpose got stuck against the target node.
+///   TransposeInputImpl may optionally insert an Unsqueeze if the input is broadcast, and a Transpose.
+///   PermuteInput inserts a Gather.
+///   Fixing a QDQ node unit is adding QDQ after a Transpose node.
 /// </summary>
 /// <param name="dq_node">DQ node that was originally the input to node.</param>
 /// <param name="orig_node">Node that had its input transposed.</param>
-static bool FixMissingQDQNodes(OptimizerCtx& ctx, api::NodeRef& orig_dq_node, api::NodeRef& orig_node,
-                               size_t input_idx /*, size_t output_idx*/) {
-  auto& graph = ctx.graph;
-
-  //const auto dq_domain = orig_dq_node.Domain();
-  //const auto& dq_inputs = orig_dq_node.Inputs();
-
-  //// check zp and scale are scalar. if one is both are, so check scale as it's the required input.
-  //// if they are not we need to handle the axis when inserting after the Transpose node
-  //const auto scale_input = dq_inputs[1];
-  //const auto scale_value_info = graph.GetValueInfo(scale_input);
-  //std::optional<std::string_view> zp_input;
-  //std::optional<std::unique_ptr<api::ValueInfoRef>> zp_value_info;
-
-  //// scalar has a shape that is empty
-  //auto scale_shape = scale_value_info->Shape();
-  //if (!scale_shape) {
-  //  // if we don't know the rank we don't know whether DQ needs an axis update after the Transpose so have to bail
-  //  return false;
-  //}
-
-  //if (dq_inputs.size() > 2) {
-  //  zp_input = dq_inputs[2];
-  //  zp_value_info = graph.GetValueInfo(zp_input.value());
-  //}
-
-  //// per-axis quantization if not a scalar (shape is empty for scalar).
-  //// note there could be an axis value as the onnx spec says that is ignored for per-tensor quantization,
-  //// so we have to check the shape.
-  //const bool update_dq_axis = !scale_shape->empty();
-  //int64_t axis = orig_dq_node.GetAttributeIntDefault("axis", 1);
-
-  // dq_node -> next_node + -> Q -> DQ using scale and zp from dq_node.
-  // returns new DQ node
-  //auto insert_q_dq_pair = [&](const api::NodeRef& dq_node, api::NodeRef& next_node) -> std::unique_ptr<api::NodeRef> {
-  //  if (update_dq_axis && next_node.OpType() == "Transpose") {
-  //    // update axis.
-  //    auto perm = GetPermAttrIfValid(next_node);
-  //    assert(perm.has_value());  // we inserted the Transpose node so it better be correct
-  //    NormalizeAndValidateAxis(axis, scale_shape->size());
-  //    axis = (*perm)[gsl::narrow_cast<size_t>(axis)];
-  //  }
-
-  //  auto next_node_output_name = next_node.Outputs()[0];
-  //  auto next_node_output_shape = graph.GetValueInfo(next_node_output_name)->Shape();
-
-  //  // setup Q node inputs. we're adding it after next_node, next_node is only ever Unsqueeze or Transpose, so
-  //  // we use output 0 for the input to Q
-  //  std::vector<std::string_view> inputs = {next_node_output_name, scale_input};
-  //  if (zp_input.has_value()) {
-  //    inputs.push_back(zp_input.value());
-  //  }
-
-  //  // Add Q and copy ValueInfo
-  //  auto new_q_node = MakeQOrDQ(graph, dq_domain, "QuantizeLinear", inputs, axis);
-  //  assert(new_q_node->SinceVersion() == dq_node.SinceVersion());  // TEMPORARY - need to check this is correct
-  //  auto q_node_outputs = new_q_node->Outputs();
-
-  //  // copy value info from the dq input for the type information, and update the shape to match next_node's output
-  //  graph.CopyValueInfo(dq_node.Inputs()[0], q_node_outputs[0]);  // Q produces same type as the dq_node input
-  //  auto q_node_value_info = graph.GetValueInfo(q_node_outputs[0]);
-  //  q_node_value_info->SetShape(next_node_output_shape ? &*next_node_output_shape : nullptr);
-
-  //  // straight copy of value info for scale and zp
-  //  graph.CopyValueInfo(scale_input, new_q_node->Outputs()[1]);
-  //  if (zp_value_info) {
-  //    graph.CopyValueInfo(zp_input.value(), new_q_node->Outputs()[2]);
-  //  }
-
-  //  // update the input for the new DQ node
-  //  inputs[0] = new_q_node->Outputs()[0];
-
-  //  // Add DQ and copy ValueInfo
-  //  auto new_dq_node = MakeQOrDQ(graph, dq_domain, "DequantizeLinear", inputs, axis);
-  //  auto dq_node_outputs = new_dq_node->Outputs();
-
-  //  // straight copy of value info as the type and shape are the same as next_node's output
-  //  graph.CopyValueInfo(next_node_output_name, dq_node_outputs[0]);
-  //  graph.CopyValueInfo(scale_input, dq_node_outputs[1]);
-  //  if (zp_value_info) {
-  //    graph.CopyValueInfo(zp_input.value(), dq_node_outputs[2]);
-  //  }
-
-  //  return new_dq_node;
-  //};
-
-  // auto output_name = orig_dq_node.Outputs()[0];
-  // auto orig_node_input_name = orig_node.Inputs()[input_idx];
-
-  // auto consumers = graph.GetValueConsumers(output_name);
-
+/// <param name="input_idx">Input index of orig_node that we're modifying the producers nodes for.</param>
+static bool FixMissingQDQNodes(api::GraphRef& graph, api::NodeRef& orig_dq_node,
+                               api::NodeRef& orig_node, size_t input_idx) {
   std::unique_ptr<api::NodeRef> last_dq_node_added;  // storage so it's valid across iterations
   api::NodeRef* cur_dq_node = &orig_dq_node;
 
   const auto get_next_node = [&graph](const api::NodeRef& cur_node) {
     auto consumers = graph.GetValueConsumers(cur_node.Outputs()[0]);
-    // we added the Unsqueeze/Transpose node so it better have a single consumer that is a node
+    // we added a Unsqueeze/Transpose/Gather node or nothing between a DQ and orig_node.
+    // in all cases there should only be a single consumer as we were modifying a single input to orig_node
     assert(consumers->comprehensive);
     assert(consumers->nodes.size() == 1);
     return std::move(consumers->nodes[0]);
@@ -402,23 +343,26 @@ static bool FixMissingQDQNodes(OptimizerCtx& ctx, api::NodeRef& orig_dq_node, ap
 
   std::unique_ptr<api::NodeRef> next_node = get_next_node(orig_dq_node);
   while (next_node->Id() != orig_node.Id()) {
-    // get following node as we need to disconnect it before adding the Q -> DQ after next_node
+    // get following node as we need to disconnect it before adding the Q -> DQ after next_node.
+    // any nodes we added (Unsqueeze/Transpose/Gather) only have one input, or input input_idx for orig_node
     auto next_next_node = get_next_node(*next_node);
-    size_t input_idx = next_next_node->Id() == orig_node.Id() ? input_idx : 0;
-    next_next_node->SetInput(input_idx, "");
+    size_t connect_to = next_next_node->Id() == orig_node.Id() ? input_idx : 0;
+    next_next_node->SetInput(connect_to, "");
 
     // add Q -> DQ after next_node
     auto inserted = InsertQDQPair(graph, *cur_dq_node, *next_node, last_dq_node_added);
 
-    if (!inserted) {
+    if (!inserted) {  // should never happen
       return false;
     }
 
     // connect
-    next_next_node->SetInput(input_idx, last_dq_node_added->Outputs()[0]);
+    next_next_node->SetInput(connect_to, last_dq_node_added->Outputs()[0]);
 
     next_node = std::move(next_next_node);
   };
+
+  return true;
 }
 
 // Adds rank to negative axes and checks that axes are unique and within [0, rank). Returns false if invalid.
@@ -436,15 +380,6 @@ static bool NormalizeAndValidateAxes(std::vector<int64_t>& axes, size_t rank) {
     }
   }
   return true;
-}
-
-static inline bool NormalizeAndValidateAxis(int64_t& axis, size_t rank) {
-  int64_t rank_int = gsl::narrow_cast<int64_t>(rank);
-  if (axis < 0) {
-    axis += rank_int;
-  }
-
-  return axis >= 0 && axis < rank_int;
 }
 
 // Read int64 data from attribute or input, depending on whether model opset < provided opset
@@ -655,27 +590,6 @@ static void UpdateDQNodeInputAndShape(api::GraphRef& graph, api::NodeRef& dq, st
   graph.GetValueInfo(dq.Outputs()[0])->SetShape(&new_shape);
 }
 
-/// <summary>
-/// Check if an output value has a single consumer, which could be a graph output or a node.
-/// </summary>
-/// <param name="consumer">Consumer node if the single consumer is a node.</param>
-/// <returns>True if there is a single consumer</returns>
-static bool OutputValueHasSingleConsumer(const api::GraphRef& graph, const api::NodeRef& node, size_t output_idx,
-                                         std::unique_ptr<api::NodeRef>& consumer) {
-  auto value = node.Outputs()[output_idx];
-  auto consumers = graph.GetValueConsumers(value);
-  bool is_graph_output = graph.IsGraphOutput(value);
-
-  bool single_consumer = consumers->comprehensive && ((consumers->nodes.size() == 1 && !is_graph_output) ||
-                                                      (consumers->nodes.empty() && is_graph_output));
-
-  if (single_consumer && !consumers->nodes.empty()) {
-    consumer = std::move(consumers->nodes[0]);
-  }
-
-  return single_consumer;
-}
-
 /////// </Helper Utils> ///////
 
 /////// <Core Helpers> ///////
@@ -699,7 +613,7 @@ static void UnsqueezeInput(OptimizerCtx& ctx, api::NodeRef& node, size_t i, cons
     // look past a DQ node for a constant initializer. essentially we pretend the DQ node doesn't exist
     // to enable directly making changes to the initializer. any nodes added for other consumers of the initializer
     // in 'Case 1' are prior to the DQ so we don't break up any QDQ node units.
-    dq_node = GetDQWithConstInitializerInput(ctx.graph, input);
+    dq_node = GetDQWithConstInitializerInputAndSingleConsumer(ctx.graph, input);
     if (dq_node) {
       // underlying string for the input name is in the Node so it's safe to store in string_view constant_dq_input
       constant_dq_input = dq_node->Inputs()[0];
@@ -876,7 +790,7 @@ static void TransposeInputImpl(api::GraphRef& graph,
     // look past a DQ node for a constant initializer. essentially we pretend the DQ node doesn't exist
     // to enable directly making changes to the initializer. any nodes added for other consumers of the initializer
     // in 'Case 1' are prior to the DQ so we don't break up any QDQ node units.
-    dq_node = GetDQWithConstInitializerInput(graph, input);
+    dq_node = GetDQWithConstInitializerInputAndSingleConsumer(graph, input);
     if (dq_node) {
       // underlying string for the input name is in the Node so it's safe to store in string_view constant_dq_input
       constant_dq_input = dq_node->Inputs()[0];
@@ -1074,13 +988,13 @@ void TransposeInput(api::GraphRef& graph, api::NodeRef& node, size_t i,
 
 static void TransposeInput(OptimizerCtx& ctx, api::NodeRef& node, size_t i, const std::vector<int64_t>& perm,
                            const std::vector<int64_t>& perm_inv) {
-  auto dq_input_node = GetDQIfProducingOutput(ctx.graph, node.Inputs()[i]);
+  auto dq_input_node = GetDQIfProducingValue(ctx.graph, node.Inputs()[i]);
   TransposeInputImpl(ctx.graph, &ctx.nodes_using_updated_shared_initializer, node, i, perm, perm_inv);
 
   // if input was originally a DQ node we may have inserted a Transpose and Unsqueeze node between the DQ and node.
   // Add DQ/Q nodes to fix the QDQ node units for the new nodes.
   if (dq_input_node) {
-    FixMissingQDQNodes(*dq_input_node, node);
+    FixMissingQDQNodes(ctx.graph, *dq_input_node, node, i);
   }
 }
 
@@ -1239,7 +1153,7 @@ static bool IsConstant(const api::GraphRef& graph, const api::NodeRef& node,
 
   // handle potentially looking past a DQ node
   if (producer_node->OpType() == "DequantizeLinear") {
-    std::unique_ptr<api::NodeRef> dq_node = GetDQWithConstInitializerInput(graph, value_name);
+    std::unique_ptr<api::NodeRef> dq_node = GetDQWithConstInitializerInputAndSingleConsumer(graph, value_name);
     if (dq_node != nullptr) {
       // DQ node pointing to an initializer that has not been updated in-place yet
       return true;
@@ -1275,17 +1189,19 @@ static int EstimateTransposeValueCost(const api::GraphRef& graph, const api::Nod
 
   // Case 2: Transposing a transpose either cancels it or composes the permutations.
   std::unique_ptr<api::NodeRef> producer_node = graph.GetNodeProducingOutput(input);
-  if (producer_node != nullptr) {
-    // look past a DQ for a Transpose node if the DQ has a single consumer.
-    // if that is the case we know the Transpose can be pushed through the DQ.
-    if (producer_node->IsOp("DequantizeLinear")) {
-      bool dq_has_single_consumer = OutputValueHasSingleConsumer(graph, *producer_node, 0);
-      if (dq_has_single_consumer) {
-        auto dq_node = std::move(producer_node);
-        producer_node = graph.GetNodeProducingOutput(dq_node->Inputs()[0]);
-      }
-    }
 
+  if (producer_node != nullptr) {
+    /*
+      // look past a DQ for a Transpose node if the DQ has a single consumer.
+      // if that is the case we know the Transpose can be pushed through the DQ.
+      if (producer_node->IsOp("DequantizeLinear")) {
+        bool dq_has_single_consumer = OutputValueHasSingleConsumer(graph, *producer_node, 0);
+        if (dq_has_single_consumer) {
+          auto dq_node = std::move(producer_node);
+          producer_node = graph.GetNodeProducingOutput(dq_node->Inputs()[0]);
+        }
+      }
+  */
     if (producer_node->IsOp("Transpose")) {
       std::optional<std::vector<int64_t>> perm2 = GetPermAttrIfValid(*producer_node);
       if (perm2 != std::nullopt) {
@@ -1515,24 +1431,30 @@ static void PermuteInput(api::GraphRef& graph, api::NodeRef& node, size_t i, con
   size_t rank = perm.size();
   int64_t rank_int = gsl::narrow_cast<int64_t>(rank);
 
-  std::string_view input = node.Inputs()[i];
-  auto constant = graph.GetConstant(input);
+  std::string_view input_name = node.Inputs()[i];
+  auto constant = graph.GetConstant(input_name);
   if (constant != nullptr) {
     auto shape = constant->Shape();
     if (shape.size() == 1 && (shape[0] == rank_int || shape[0] == 0)) {
-      Permute1DConstant(graph, node, *constant, i, input, perm);
+      Permute1DConstant(graph, node, *constant, i, input_name, perm);
       return;
     }
   }
 
+  auto dq_input_node = GetDQIfProducingValue(graph, input_name);
+
   std::string_view gather_indices_const = AddInitializerInt64(graph, /*shape*/ {rank_int}, perm);
-  std::vector<std::string_view> gather_inputs{input, gather_indices_const};
+  std::vector<std::string_view> gather_inputs{input_name, gather_indices_const};
   auto gather_ptr = graph.AddNode("Gather", gather_inputs, /*num_outputs*/ 1);
   api::NodeRef& gather = *gather_ptr;
   std::string_view gather_output = gather.Outputs()[0];
-  graph.CopyValueInfo(input, gather_output);
+  graph.CopyValueInfo(input_name, gather_output);
   gather.SetAttributeInt("axis", 0);
   node.SetInput(i, gather_output);
+
+  if (dq_input_node) {
+    FixMissingQDQNodes(graph, *dq_input_node, node, i);
+  }
 }
 
 bool HandleResize([[maybe_unused]] HandlerArgs& args) {
@@ -2445,7 +2367,7 @@ static bool ShouldProcessTranspose(OptimizerCtx& ctx, api::NodeRef& node,
   }
 
   if (cost == CostCheckResult::kFallThrough) {
-    cost = DefaultCostCheck(ctx.graph, node, perm, outputs_leading_to_transpose, *info, input_indices,
+    cost = DefaultCostCheck(ctx.graph, node, perm, outputs_leading_to_transpose, info, input_indices,
                             ctx.extended_handlers, ctx.nodes_using_updated_shared_initializer)
                ? CostCheckResult::kPushTranspose
                : CostCheckResult::kStop;
@@ -2467,6 +2389,7 @@ bool ProcessTranspose(OptimizerCtx& ctx, api::NodeRef& transpose, api::NodeRef& 
     return false;
   }
 
+  /*
   // Special-case DQ nodes in a QDQ node unit (DQ -> Op -> Q)
   // where DQ output has single consumer (including graph outputs in consumer count)
   //
@@ -2501,6 +2424,7 @@ bool ProcessTranspose(OptimizerCtx& ctx, api::NodeRef& transpose, api::NodeRef& 
 
     // fall through to standard processing to check the DQ node for the sake of completeness
   }
+  */
 
   std::vector<size_t> input_indices = info->transposible_inputs_fn(ctx, node);
   if (!ShouldProcessTranspose(ctx, node, perm, transpose_input_index, outputs_leading_to_transpose,
@@ -2667,75 +2591,80 @@ OptimizeResult OptimizeImpl(OptimizerCtx& ctx) {
   //   DQ -> Q -> DQ
   // We look for that as we only mo
 
-  /*
-  // Run second optimization pass.
-  // If any transpose succeeds a DQ node, move it above the DQ node if it's not part of a QDQ node group.
-  // In QDQ models this helps to preserve the QDQ node group when a Transpose was pushed across a DQ into
-  // an existing QDQ node group.
-  // In all other scenarios this is beneficial as well because moving transpose above DQ node is more efficient as
-  // transpose node now handles less data.
   auto graph_nodes = ctx.graph.Nodes();
   for (size_t i = 1; i < graph_nodes.size(); i++) {
-    const auto& node = *graph_nodes[i];
+    auto& node = *graph_nodes[i];
 
     if (!can_modify_node(node)) {
       continue;
     }
 
+    auto input_node = ctx.graph.GetNodeProducingOutput(node.Inputs()[0]);
+    if (!input_node) {
+      // all following logic requires an input_node
+      continue;
+    }
+
+    std::unique_ptr<api::NodeRef> single_consumer_node;
+
+    // remove unnecessary DQ and Q at start of DQ -> Q -> DQ
+    if (node.OpType() == "DequantizeLinear" && input_node->OpType() == "QuantizeLinear") {
+      auto q_input_node = ctx.graph.GetNodeProducingOutput(input_node->Inputs()[0]);
+      if (q_input_node && q_input_node->OpType() == "DequantizeLinear" &&
+          OutputValueHasSingleConsumer(ctx.graph, *q_input_node, 0, single_consumer_node) &&
+          OutputValueHasSingleConsumer(ctx.graph, *input_node, 0, single_consumer_node)) {
+        auto& first_dq_node = *q_input_node;
+        auto& q_node = *input_node;
+
+        // remove q_input_node (DQ) and input_node (Q)
+        // connect last DQ up to the input of the first DQ
+        node.SetInput(0, first_dq_node.Inputs()[0]);
+
+        // disconnect other nodes
+        first_dq_node.SetInput(0, "");
+        q_node.SetInput(0, "");
+
+        // and remove
+        ctx.graph.RemoveNode(first_dq_node);
+        ctx.graph.RemoveNode(q_node);
+
+        changed = true;
+        continue;
+      }
+    }
+
+    // fix Transpose inside Q -> DQ node unit by adding a Q -> DQ pair after it
+    // DQ -> Transpose -> Op -> Q => DQ -> Transpose -> Q -> DQ -> Op -> Q
     if (node.OpType() == "Transpose") {
       auto& transpose_node = *graph_nodes[i];
-      auto dq_node = ctx.graph.GetNodeProducingOutput(transpose_node.Inputs()[0]);
-      if (!dq_node || dq_node->OpType() != "DequantizeLinear") {
+      if (!input_node || input_node->OpType() != "DequantizeLinear") {
         continue;
       }
 
-      // Check if Transpose node is the only consumer of dq node
-      auto consumers_of_dq_node = ctx.graph.GetValueConsumers(dq_node->Outputs()[0]);
-      if (!consumers_of_dq_node->comprehensive || consumers_of_dq_node->nodes.size() > 1) {
+      auto& dq_node = *input_node;
+      // make sure Transpose node is the only consumer of dq node. should always be.
+      // the single consumer could be a graph output so we also check a consumer node was returned
+      if (!OutputValueHasSingleConsumer(ctx.graph, dq_node, 0, single_consumer_node) || !single_consumer_node) {
         continue;
       }
 
-      auto consumers_of_transpose_node = ctx.graph.GetValueConsumers(transpose_node.Outputs()[0]);
-      bool is_part_of_qdq_group = std::find_if(consumers_of_transpose_node->nodes.cbegin(),
-                                               consumers_of_transpose_node->nodes.cend(),
-                                               [](const std::unique_ptr<api::NodeRef>& node) {
-                                                 return node->OpType() == "QuantizeLinear";
-                                               }) != consumers_of_transpose_node->nodes.cend();
-      if (is_part_of_qdq_group) {
+      auto& qdq_node_unit_target_node = *single_consumer_node;
+      if (!OutputValueHasSingleConsumer(ctx.graph, qdq_node_unit_target_node, 0, single_consumer_node) ||
+          !single_consumer_node ||
+          single_consumer_node->OpType() != "QuantizeLinear") {
+        // output 0 of the target node is not connected to a Q, so we infer this is not a QDQ node unit
         continue;
       }
 
-      // Update Dequantize Node and move the transpose above it
-      auto perm = GetPermAttrIfValid(transpose_node);
-      if (!perm.has_value()) {
-        continue;
+      // insert Q -> DQ pair after the Transpose so
+      // DQ -> Transpose -> target node -> Q =>
+      // DQ -> Transpose -> Q -> DQ -> target_node -> Q
+      // which turns them into 2 valid QDQ node units
+      if (FixMissingQDQNodes(ctx.graph, dq_node, transpose_node, 0)) {
+        changed = true;
       }
-
-      // we're moving the Transpose to before the DQ, so we need to use the inverse permutations to update the axis
-      // attribute correctly when doing per-axis dequantization
-      std::string_view dq_domain = dq_node->Domain();
-      std::vector<int64_t> perm_inv = InvertPerm(*perm);
-
-      if (IsOnnxDomain(dq_domain) && !HandleQuantizeDequantizeAxis(ctx.graph, perm_inv, *dq_node, ctx.opset)) {
-        continue;
-      }
-
-      // NOTE: this bleeds ORT specific logic into the base optimizer, however we justify that for now because we expect
-      // the types that the ORT DQ provides to be added to the ONNX spec, at which point this special case can go away.
-      if (IsMSDomain(dq_domain) && !TransposeQuantizeDequantizeAxis(ctx.graph, perm_inv, *dq_node)) {
-        continue;
-      }
-
-      TransposeFirstInput(ctx, *dq_node, *perm);
-
-      // remove existing transpose node
-      transpose_node.SetInput(0, "");
-      ctx.graph.MoveOutput(transpose_node, 0, *dq_node, 0);
-      ctx.graph.RemoveNode(transpose_node);
-      changed = true;
     }
   }
-  */
 
   result.graph_modified = changed;
   return result;
