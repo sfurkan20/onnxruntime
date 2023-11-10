@@ -19,7 +19,7 @@ def CheckDelegateUnmanagedFunctionPointerMatch(file: pathlib.Path):
 
     errors = 0
     line_num = 0
-    with (open(str(file.resolve(strict=True))) as f):
+    with open(str(file.resolve(strict=True))) as f:
         prev_line = ""
         for line in f.readlines():
             line_num += 1

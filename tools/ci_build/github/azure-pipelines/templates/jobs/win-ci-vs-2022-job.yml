@@ -176,7 +176,7 @@ jobs:
       workingDirectory: '$(Build.SourcesDirectory)\csharp'
 
   - script: |
-      python ValidateNativeDelegateAttributes.py
+      python3 ValidateNativeDelegateAttributes.py
     displayName: 'Validate C# native delegates'
     workingDirectory: '$(Build.SourcesDirectory)\csharp\tools'
 
