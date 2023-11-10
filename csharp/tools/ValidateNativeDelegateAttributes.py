@@ -46,10 +46,9 @@ def main():
     # no real arg. just using this to provide description as help message
     _ = arg_parser.parse_args()
 
-    # CI needs resolve() to run as __file__ is just the filename
+    # CI needs resolve()  __file__ is a relative path when the script is run there
     script_dir = pathlib.Path(__file__).resolve().parent
     csharp_root = script_dir.parent
-    print(script_dir)
 
     managed_dir = csharp_root / "src" / "Microsoft.ML.OnnxRuntime"
     native_methods =  managed_dir / "NativeMethods.shared.cs"

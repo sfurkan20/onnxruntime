@@ -1975,7 +1975,7 @@ namespace Microsoft.ML.OnnxRuntime
 
         // The out ortMemoryInfo must not be destroyed/deallocated. The pointer points to an object owned by
         // the contained Tensor/SparseTensor.
-        // TEMPORARY TEST CI catches this [UnmanagedFunctionPointer(CallingConvention.Winapi)]
+        [UnmanagedFunctionPointer(CallingConvention.Winapi)]
         public delegate IntPtr /*(OrtStatus*)*/ DOrtGetTensorMemoryInfo(IntPtr /* const OrtValue* */ ortValue,
                                                                         out IntPtr /* const OrtMemoryInfo** */ ortMemoryInfo);
 
