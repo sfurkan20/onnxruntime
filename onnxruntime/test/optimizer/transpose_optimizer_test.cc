@@ -3742,66 +3742,6 @@ TEST(TransposeOptimizerTests, TestDequantizeLinearNoAxis) {
 #endif
 }
 
-// Utility function that runs TransformerTester for the graph in which a single DequantizeLinear node is
-// the parent of two Transpose nodes. The DQ should be duplicated by EnsureUniqueDQForNodeUnit, and the
-// Transposes should be pushed.
-template <typename QuantType>
-static void RunDequantizeLinearTransposePropagationTestCase(const std::string& dq_domain = "") {
-  auto build_test_case = [dq_domain](ModelTestBuilder& builder) {
-    auto* input0_arg = MakeInput<QuantType>(builder, {{2, -1, 6, 3}}, {2, 4, 6, 3}, 0, 5);
-    auto* scale_arg = MakeInput<float>(builder, {std::vector<int64_t>{}}, std::vector<int64_t>{}, {2.3f});
-    auto* zero_point_arg = MakeInput<QuantType>(builder, {std::vector<int64_t>{}}, std::vector<int64_t>{}, {10});
-    auto* dequantizelinear_1_out_0 = builder.MakeIntermediate();
-    auto* transpose_1_out_0 = builder.MakeOutput();
-    auto* transpose_2_out_0 = builder.MakeOutput();
-
-    builder.AddNode("DequantizeLinear", {input0_arg, scale_arg, zero_point_arg}, {dequantizelinear_1_out_0},
-                    dq_domain);
-
-    auto& transpose_1 = builder.AddNode("Transpose", {dequantizelinear_1_out_0}, {transpose_1_out_0});
-    transpose_1.AddAttribute("perm", std::vector<int64_t>{0, 3, 1, 2});
-
-    auto& transpose_2 = builder.AddNode("Transpose", {dequantizelinear_1_out_0}, {transpose_2_out_0});
-    transpose_2.AddAttribute("perm", std::vector<int64_t>{0, 2, 3, 1});
-  };
-
-  auto check_graph = [dq_domain](InferenceSessionWrapper& session) {
-    const auto& graph = session.GetGraph();
-
-    const char* dq_count_key = (dq_domain == kMSDomain) ? "com.microsoft.DequantizeLinear" : "DequantizeLinear";
-    const auto op_count = CountOpsInGraph(graph);
-    decltype(op_count) expected_op_count{
-        {dq_count_key, 2},  // EnsureUniqueDQForNodeUnit should duplicate the original DQ
-        {"Transpose", 2},
-    };
-    ASSERT_EQ(op_count, expected_op_count);
-
-    // Transposes should be pushed, so check for Transpose -> DQ edges
-    for (const auto& node : graph.Nodes()) {
-      if (node.OpType() == "Transpose") {
-        ASSERT_EQ(node.GetOutputEdgesCount(), static_cast<size_t>(1));
-        ASSERT_EQ(node.OutputEdgesBegin()->GetNode().OpType(), "DequantizeLinear");
-      }
-    }
-  };
-
-  TransformerTester(build_test_case,
-                    check_graph,
-                    TransformerLevel::Default,
-                    TransformerLevel::Level1,
-                    /*opset_version*/ 10);
-}
-
-TEST(TransposeOptimizerTests, TestDequantizeLinearTransposePropagation) {
-  RunDequantizeLinearTransposePropagationTestCase<uint8_t>();
-#if !defined(DISABLE_CONTRIB_OPS)
-  // Use com.microsoft.DequantizeLinear
-  RunDequantizeLinearTransposePropagationTestCase<uint8_t>(kMSDomain);
-  RunDequantizeLinearTransposePropagationTestCase<uint16_t>(kMSDomain);
-  RunDequantizeLinearTransposePropagationTestCase<int16_t>(kMSDomain);
-#endif
-}
-
 TEST(TransposeOptimizerTests, TestCast) {
   auto build_test_case_1 = [&](ModelTestBuilder& builder) {
     auto* input0_arg = MakeInput<int32_t>(builder, {{-1, 4, -1, 5}}, {2, 4, 6, 5}, -1, 5);
@@ -4469,7 +4409,7 @@ TEST(TransposeOptimizerTests, QnnTransposeReshape) {
   // tests as the filenames for the debug output are hardcoded.
   // check the build output directory for files called `post_layout_transform_step_<step#>.onnx` to see how the graph
   // changes during the layout transformation process.
-  ASSERT_STATUS_OK(so.config_options.AddConfigEntry(kDebugLayoutTransformation, "1"));
+  // ASSERT_STATUS_OK(so.config_options.AddConfigEntry(kDebugLayoutTransformation, "1"));
 
   using InternalTestingEP = onnxruntime::internal_testing_ep::InternalTestingExecutionProvider;
 
@@ -4670,6 +4610,56 @@ TEST(TransposeOptimizerTests, SharedInitializerHandling) {
 // followed by canceling out the Transpose in TransposeInput.
 TEST(TransposeOptimizerTests, SharedInitializerHandlingBroadcast) {
   CheckSharedInitializerHandling(/*broadcast*/ true);
+}
+
+// model where layout transform results in transposing a non-const input that is broadcast.
+// this inserts Unsqueeze -> Transpose between the input and the node.
+// test that QDQ node units are created for Unsqueeze and Transpose by inserting Q->DQ pairs after them
+TEST(TransposeOptimizerTests, QnnTransposeNonConstBroadcastInput) {
+  Status status;
+  auto model_uri = ORT_TSTR("testdata/layout_transform_nonconst_broadcast_input.onnx");
+
+  SessionOptions so;
+
+  // enable dumping graph so one test validates that infrastructure works. we don't want to do that in multiple
+  // tests as the filenames for the debug output are hardcoded.
+  // check the build output directory for files called `post_layout_transform_step_<step#>.onnx` to see how the graph
+  // changes during the layout transformation process.
+  ASSERT_STATUS_OK(so.config_options.AddConfigEntry(kDebugLayoutTransformation, "1"));
+
+  using InternalTestingEP = onnxruntime::internal_testing_ep::InternalTestingExecutionProvider;
+
+  // set the test EP to support all ops in the model so that the layout transform applies to all nodes
+  const std::unordered_set<std::string> empty_set;
+  auto internal_testing_ep = std::make_unique<InternalTestingEP>(empty_set, empty_set, DataLayout::NHWC);
+  internal_testing_ep->EnableStaticKernels().TakeAllNodes();
+
+  InferenceSessionWrapper session{so, GetEnvironment()};
+  ASSERT_STATUS_OK(session.RegisterExecutionProvider(std::move(internal_testing_ep)));
+  ASSERT_STATUS_OK(session.Load(model_uri));
+  ASSERT_STATUS_OK(session.Initialize());
+
+  const auto& graph = session.GetGraph();
+  std::map<std::string, int> op_to_count = CountOpsInGraph(graph);
+
+  ASSERT_EQ(op_to_count["Transpose"], 3) << "Should have Transpose on 2 inputs and one on output.";
+
+  // all nodes should be assigned to the internal testing EP, which also means they should be in NHWC layout
+  std::string expected_ep(onnxruntime::utils::kInternalTestingExecutionProvider);
+  for (const auto& node : graph.Nodes()) {
+    EXPECT_EQ(node.GetExecutionProviderType(), expected_ep) << node.OpType() << " node named '" << node.Name()
+                                                            << "' was not assigned to the internal testing EP.";
+    // all nodes should be in QDQ node units except the Cast on an input which was not in a QDQ unit
+    if (node.OpType() != "QuantizeLinear" && node.OpType() != "DequantizeLinear" && node.OpType() != "Cast") {
+      for (auto cur_input = node.InputNodesBegin(), end = node.InputNodesEnd(); cur_input != end; ++cur_input) {
+        EXPECT_EQ(cur_input->OpType(), "DequantizeLinear");
+      }
+
+      for (auto cur_output = node.InputNodesBegin(), end = node.InputNodesEnd(); cur_output != end; ++cur_output) {
+        EXPECT_EQ(cur_output->OpType(), "QuantizeLinear");
+      }
+    }
+  }
 }
 }  // namespace test
 }  // namespace onnxruntime

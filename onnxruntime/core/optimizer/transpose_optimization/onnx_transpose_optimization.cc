@@ -106,7 +106,7 @@ static std::unique_ptr<api::NodeRef> MakeSqueezeOrUnsqueeze(int64_t opset, api::
 static std::unique_ptr<api::NodeRef> MakeQOrDQ(api::GraphRef& graph, std::string_view domain, std::string_view op_type,
                                                std::vector<std::string_view> inputs,  // data, scale{, zp}
                                                std::optional<int64_t> axis) {
-  std::unique_ptr<api::NodeRef> node = graph.AddNode(op_type, inputs, inputs.size(), domain);
+  std::unique_ptr<api::NodeRef> node = graph.AddNode(op_type, inputs, /* num_outputs */ 1, domain);
   if (!domain.empty()) {
     assert(node->SinceVersion() == 1);
   }
@@ -280,7 +280,7 @@ static bool InsertQDQPair(api::GraphRef& graph, const api::NodeRef& dq_node, api
   // setup Q node inputs. we're adding it after next_node, next_node is Unsqueeze/Transpose/Gather, so
   // we use output 0 (the only output) for the input to Q
   std::vector<std::string_view> inputs = {next_node_output_name, scale_input};
-  if (zp_input.has_value()) {
+  if (zp_input) {
     inputs.push_back(zp_input.value());
   }
 
@@ -295,10 +295,10 @@ static bool InsertQDQPair(api::GraphRef& graph, const api::NodeRef& dq_node, api
   q_node_value_info->SetShape(next_node_output_shape ? &*next_node_output_shape : nullptr);
 
   // straight copy of value info for scale and zp
-  graph.CopyValueInfo(scale_input, new_q_node->Outputs()[1]);
-  if (zp_value_info) {
-    graph.CopyValueInfo(zp_input.value(), new_q_node->Outputs()[2]);
-  }
+  // graph.CopyValueInfo(scale_input, new_q_node->Inputs()[1]);
+  // if (zp_input) {
+  //  graph.CopyValueInfo(zp_input.value(), new_q_node->Inputs()[2]);
+  //}
 
   // update the input for the new DQ node
   inputs[0] = new_q_node->Outputs()[0];
@@ -309,10 +309,10 @@ static bool InsertQDQPair(api::GraphRef& graph, const api::NodeRef& dq_node, api
 
   // straight copy of value info as the type and shape are the same as next_node's output
   graph.CopyValueInfo(next_node_output_name, dq_node_outputs[0]);
-  graph.CopyValueInfo(scale_input, dq_node_outputs[1]);
-  if (zp_value_info) {
-    graph.CopyValueInfo(zp_input.value(), dq_node_outputs[2]);
-  }
+  // graph.CopyValueInfo(scale_input, dq_node_outputs[1]);
+  // if (zp_value_info) {
+  //   graph.CopyValueInfo(zp_input.value(), dq_node_outputs[2]);
+  // }
 
   return true;
 }
@@ -671,7 +671,7 @@ static void UnsqueezeInput(OptimizerCtx& ctx, api::NodeRef& node, size_t i, cons
 
   // check if this is a special-cased DQ node where we put the Squeeze on input 0 of the DQ in 'Case 1' above
   if (inp_node && inp_node->OpType() == "DequantizeLinear" &&
-      std::find_if(ctx.nodes_using_updated_shared_initializer.begin(),
+      std::find_if(ctx.nodes_using_updated_shared_initializer.begin(),  // TODO: Do we even need this check or is a simple look-past any DQ just as good?
                    ctx.nodes_using_updated_shared_initializer.end(),
                    [&inp_node](const auto& entry) {
                      const auto id = entry.first;
@@ -722,30 +722,36 @@ static void UnsqueezeInput(OptimizerCtx& ctx, api::NodeRef& node, size_t i, cons
     inp_node = std::move(dq_node);
   }
 
-  // Case 3: Add an Unsqueeze node.
-  auto unsqueeze_ptr = MakeSqueezeOrUnsqueeze(ctx.opset, ctx.graph, "Unsqueeze", input, axes);
-  api::NodeRef& unsqueeze = *unsqueeze_ptr;
-  std::string_view unsq_out = unsqueeze.Outputs()[0];
-  ctx.graph.CopyValueInfo(input, unsq_out);
-  ctx.graph.GetValueInfo(unsq_out)->UnsqueezeDims(axes);
+  do {
+    // Case 3: Add an Unsqueeze node.
+    auto unsqueeze_ptr = MakeSqueezeOrUnsqueeze(ctx.opset, ctx.graph, "Unsqueeze", input, axes);
+    api::NodeRef& unsqueeze = *unsqueeze_ptr;
+    std::string_view unsq_out = unsqueeze.Outputs()[0];
+    ctx.graph.CopyValueInfo(input, unsq_out);
+    ctx.graph.GetValueInfo(unsq_out)->UnsqueezeDims(axes);
 
-  // The transpose optimizer attempts to complete all optimization in a single pass. Adding Unsqueeze ops to inputs
-  // is one of the few operations that violates the normal traversal order. If the input to the new Unsqueeze is
-  // a Transpose, optimize it here.
-  if (inp_node != nullptr && inp_node->IsOp("Transpose")) {
-    auto perm = GetPermAttrIfValid(*inp_node);
-    if (perm.has_value()) {
-      auto perm_inv = InvertPerm(*perm);
-      std::vector<size_t> indices = {0};
-      HandlerArgs args{ctx, *inp_node, unsqueeze, *perm, perm_inv, indices};
-      const auto new_input = HelpHandleUnsqueeze(args, axes);
-      // Use output from optimization (likely from pushed transpose)
-      node.SetInput(i, new_input);
-      return;
+    // The transpose optimizer attempts to complete all optimization in a single pass. Adding Unsqueeze ops to inputs
+    // is one of the few operations that violates the normal traversal order. If the input to the new Unsqueeze is
+    // a Transpose, optimize it here.
+    if (inp_node != nullptr && inp_node->IsOp("Transpose")) {
+      auto perm = GetPermAttrIfValid(*inp_node);
+      if (perm.has_value()) {
+        auto perm_inv = InvertPerm(*perm);
+        std::vector<size_t> indices = {0};
+        HandlerArgs args{ctx, *inp_node, unsqueeze, *perm, perm_inv, indices};
+        const auto new_input = HelpHandleUnsqueeze(args, axes);
+        // Use output from optimization (likely from pushed transpose)
+        node.SetInput(i, new_input);
+        return;
+      }
     }
-  }
 
-  node.SetInput(i, unsq_out);
+    node.SetInput(i, unsq_out);
+  } while (false);
+
+  if (inp_node->OpType() == "DequantizeLinear") {
+    FixMissingQDQNodes(ctx.graph, *inp_node, node, i);
+  }
 }
 
 static void Permute1DConstant(api::GraphRef& graph, api::NodeRef& node, api::TensorRef& constant,
@@ -883,6 +889,8 @@ static void TransposeInputImpl(api::GraphRef& graph,
 
   // Case 2: input is a Transpose node
   std::unique_ptr<api::NodeRef> inp_node = graph.GetNodeProducingOutput(input);
+
+  // TODO: Is simple always look past DQ sufficient?
 
   // check if this is a special-cased DQ node where we put the Transpose on input 0 of the DQ in 'Case 1' above
   if (inp_node && inp_node->OpType() == "DequantizeLinear" &&
