@@ -15,17 +15,13 @@ parameters:
   EnvSetupScript: 'setup_env.bat'
   AgentPool: 'onnxruntime-Win-CPU-2022'
   AgentDemands: []
+  OrtPackageId: Microsoft.ML.OnnxRuntime.DirectML
   BuildConfigurations: ['RelWithDebInfo'] # Options: Debug, RelWithDebInfo
   RunTests : 'true'
   EnableLto: true
   # Controls whether unreleased onnx opsets are allowed. Default is set to 1
   AllowReleasedOpsetOnly: '0'
   IsReleaseBuild: false
-
-- name: OrtPackageId
-  type: string
-  default: Microsoft.ML.OnnxRuntime
-
 stages:
 - stage: ${{ parameters.StageName }}
   dependsOn: []
