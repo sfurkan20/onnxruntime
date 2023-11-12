@@ -506,11 +506,8 @@ std::unique_ptr<api::ValueConsumers> ApiGraph::GetValueConsumers(std::string_vie
     }
   }
 
-  const auto& graph_outputs = graph_.GetOutputs();
-  for (const auto* output : graph_outputs) {
-    if (output->Name() == name) {
-      consumers->comprehensive = false;
-    }
+  if (IsGraphOutput(name)) {
+    consumers->comprehensive = false;
   }
 
   return consumers;
@@ -522,14 +519,7 @@ bool ApiGraph::HasValueConsumers(std::string_view name) const {
     return true;
   }
 
-  const auto& graph_outputs = graph_.GetOutputs();
-  for (const auto* output : graph_outputs) {
-    if (output->Name() == name) {
-      return true;
-    }
-  }
-
-  return false;
+  return IsGraphOutput(name);
 }
 
 std::unique_ptr<api::NodeRef> ApiGraph::GetNodeProducingOutput(std::string_view name) const {

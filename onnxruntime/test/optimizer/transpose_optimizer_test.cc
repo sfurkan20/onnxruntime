@@ -4655,7 +4655,7 @@ TEST(TransposeOptimizerTests, QnnTransposeNonConstBroadcastInput) {
         EXPECT_EQ(cur_input->OpType(), "DequantizeLinear");
       }
 
-      for (auto cur_output = node.InputNodesBegin(), end = node.InputNodesEnd(); cur_output != end; ++cur_output) {
+      for (auto cur_output = node.OutputNodesBegin(), end = node.OutputNodesEnd(); cur_output != end; ++cur_output) {
         EXPECT_EQ(cur_output->OpType(), "QuantizeLinear");
       }
     }
