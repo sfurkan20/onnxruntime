@@ -18,6 +18,9 @@ namespace {
 CostCheckResult PostLayoutTransformCostCheck(const api::GraphRef& graph, const api::NodeRef& node,
                                              const std::vector<int64_t>& perm,
                                              const std::unordered_set<std::string>& outputs_leading_to_transpose) {
+  if (node.OpType() == "Mul") {
+    std::cout << "m";
+  }
   // we aggressively push the layout transpose nodes.
   // Exception: pushing through a Concat can result in Transpose nodes being added to multiple other inputs which
   // can potentially be worse for performance. Use the cost check in that case.
