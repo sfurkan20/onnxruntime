@@ -607,17 +607,17 @@ static void UnsqueezeInput(OptimizerCtx& ctx, api::NodeRef& node, size_t i, cons
     // (see Case 2).
     if (consumers->nodes.size() > 0) {
       // record the consumer node input as being special cased for use in Case 2 if a DQ node, and IsConstant
-      for (auto& consumer : consumers->nodes) {
-        auto& consumer_node_inputs = ctx.nodes_using_updated_shared_initializer[consumer->Id()];
+      // for (auto& consumer : consumers->nodes) {
+      //  auto& consumer_node_inputs = ctx.nodes_using_updated_shared_initializer[consumer->Id()];
 
-        // find input id/s for consumer
-        auto consumer_inputs = consumer->Inputs();
-        for (size_t input_idx = 0; input_idx < consumer_inputs.size(); ++input_idx) {
-          if (consumer_inputs[input_idx] == value_to_modify) {
-            consumer_node_inputs.push_back(input_idx);
-          }
-        }
-      }
+      //  // find input id/s for consumer
+      //  auto consumer_inputs = consumer->Inputs();
+      //  for (size_t input_idx = 0; input_idx < consumer_inputs.size(); ++input_idx) {
+      //    if (consumer_inputs[input_idx] == value_to_modify) {
+      //      consumer_node_inputs.push_back(input_idx);
+      //    }
+      //  }
+      //}
 
       auto squeeze_ptr = MakeSqueezeOrUnsqueeze(ctx.opset, ctx.graph, "Squeeze", value_to_modify, axes);
       api::NodeRef& squeeze = *squeeze_ptr;
@@ -641,9 +641,9 @@ static void UnsqueezeInput(OptimizerCtx& ctx, api::NodeRef& node, size_t i, cons
   std::unique_ptr<api::NodeRef> inp_node = ctx.graph.GetNodeProducingOutput(input);
 
   // check if this is a special-cased DQ node where we put the Squeeze on input 0 of the DQ in 'Case 1' above
-  if (inp_node && inp_node->OpType() == "DequantizeLinear" 
+  if (inp_node && inp_node->OpType() == "DequantizeLinear"
       //&&
-      //std::find_if(ctx.nodes_using_updated_shared_initializer.begin(),  // TODO: Do we even need this check or is a simple look-past any DQ just as good?
+      // std::find_if(ctx.nodes_using_updated_shared_initializer.begin(),  // TODO: Do we even need this check or is a simple look-past any DQ just as good?
       //             ctx.nodes_using_updated_shared_initializer.end(),
       //             [&inp_node](const auto& entry) {
       //               const auto id = entry.first;
@@ -652,7 +652,7 @@ static void UnsqueezeInput(OptimizerCtx& ctx, api::NodeRef& node, size_t i, cons
       //               return id == inp_node->Id() &&
       //                      std::find(input_idxs.begin(), input_idxs.end(), size_t(0)) != input_idxs.end();
       //             }) != ctx.nodes_using_updated_shared_initializer.end()
-                       ) {
+  ) {
     // set things up so we can look past the DQ node to the Squeeze that was inserted in front of the reshaped
     // constant initializer that was shared with this node.
     dq_node = std::move(inp_node);
@@ -753,7 +753,7 @@ static void Permute1DConstant(api::GraphRef& graph, api::NodeRef& node, api::Ten
 // Replaces ith input to node with transposed value. Might create a new Transpose node, find an existing one,
 // or transpose an initializer.
 static void TransposeInputImpl(api::GraphRef& graph,
-                               NodeIdToInputIdxsMap* nodes_using_updated_shared_initializer,
+                               NodeIdToInputIdxsMap* /*nodes_using_updated_shared_initializer*/,
                                api::NodeRef& node, size_t i, const std::vector<int64_t>& perm,
                                const std::vector<int64_t>& perm_inv) {
   std::string_view input = node.Inputs()[i];
@@ -829,19 +829,19 @@ static void TransposeInputImpl(api::GraphRef& graph,
       // to counteract the effect. These Transposes will hopefully be optimized out later.
 
       // record the consumer node's input as being special cased for use in Case 2 if a DQ node, and IsConstant
-      if (nodes_using_updated_shared_initializer) {
-        for (auto& consumer : consumers->nodes) {
-          auto& consumer_node_inputs = (*nodes_using_updated_shared_initializer)[consumer->Id()];
+      // if (nodes_using_updated_shared_initializer) {
+      //  for (auto& consumer : consumers->nodes) {
+      //    auto& consumer_node_inputs = (*nodes_using_updated_shared_initializer)[consumer->Id()];
 
-          // find input id/s for consumer
-          auto consumer_inputs = consumer->Inputs();
-          for (size_t input_idx = 0; input_idx < consumer_inputs.size(); ++input_idx) {
-            if (consumer_inputs[input_idx] == constant_to_modify) {
-              consumer_node_inputs.push_back(input_idx);
-            }
-          }
-        }
-      }
+      //    // find input id/s for consumer
+      //    auto consumer_inputs = consumer->Inputs();
+      //    for (size_t input_idx = 0; input_idx < consumer_inputs.size(); ++input_idx) {
+      //      if (consumer_inputs[input_idx] == constant_to_modify) {
+      //        consumer_node_inputs.push_back(input_idx);
+      //      }
+      //    }
+      //  }
+      //}
 
       auto transpose_inv_ptr = MakeTranspose(graph, constant_to_modify, perm_inv);
       api::NodeRef& transpose_inv = *transpose_inv_ptr;
@@ -1120,7 +1120,7 @@ static bool CanLikelyRemoveTranspose(const api::GraphRef& graph, api::NodeRef& t
 static bool IsConstant(const api::GraphRef& graph, const api::NodeRef& node,
                        size_t input_id,
                        std::string_view value_name,
-                       const NodeIdToInputIdxsMap& nodes_using_updated_shared_initializer) {
+                       const NodeIdToInputIdxsMap& /*nodes_using_updated_shared_initializer*/) {
   std::unique_ptr<api::NodeRef> producer_node = graph.GetNodeProducingOutput(value_name);
 
   if (!producer_node) {
@@ -1145,12 +1145,12 @@ static bool IsConstant(const api::GraphRef& graph, const api::NodeRef& node,
     input_id = 0;  // can only be input 0 of a DQ node
   }
 
-  auto entry = nodes_using_updated_shared_initializer.find(node_id_to_check);
-  if (entry != nodes_using_updated_shared_initializer.end()) {
-    if (std::find(entry->second.begin(), entry->second.end(), input_id) != entry->second.end()) {
-      return true;
-    }
-  }
+  // auto entry = nodes_using_updated_shared_initializer.find(node_id_to_check);
+  // if (entry != nodes_using_updated_shared_initializer.end()) {
+  //   if (std::find(entry->second.begin(), entry->second.end(), input_id) != entry->second.end()) {
+  //     return true;
+  //   }
+  // }
 
   return false;
 }
@@ -2608,6 +2608,12 @@ OptimizeResult OptimizeImpl(OptimizerCtx& ctx) {
       auto& q_node = node;
       if (OutputValueHasSingleConsumerNode(ctx.graph, dq_node, 0, single_consumer_node) &&
           OutputValueHasSingleConsumerNode(ctx.graph, q_node, 0, single_consumer_node)) {
+        // make sure the type, scale or isn't being changed from a preceeding Q
+        auto node_before_dq = ctx.graph.GetNodeProducingOutput(dq_node.Inputs()[0]);
+        if (node_before_dq && node_before_dq->OpType() == "QuantizeLinear") {
+          TODO
+        }
+
         // connect consumer to DQ input
         single_consumer_node->SetInput(0, dq_node.Inputs()[0]);
 
