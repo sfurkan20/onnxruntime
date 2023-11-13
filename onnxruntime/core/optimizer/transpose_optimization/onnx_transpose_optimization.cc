@@ -336,6 +336,89 @@ static bool MakeQDQNodeUnit(api::GraphRef& graph, const api::NodeRef& dq_node) {
   return true;
 }
 
+/// <summary>
+/// Check if an empty DQ -> Q pair have matching type/scale/zero point and can be removed.
+/// </summary>
+/// <returns>True if they match.</returns>
+static bool CheckQDQNodePairMatch(const api::GraphRef& graph,
+                                  const api::NodeRef& dq_node, const api::NodeRef& q_node) {
+  bool match = false;
+
+  do {
+    if (dq_node.Domain() != q_node.Domain()) {
+      break;
+    }
+
+    auto t1 = graph.GetValueInfo(dq_node.Inputs()[0])->DType();
+    auto t2 = graph.GetValueInfo(q_node.Outputs()[0])->DType();
+
+    if (t1 == api::DataType::UNDEFINED || t2 == api::DataType::UNDEFINED || t1 != t2) {
+      break;
+    }
+
+    auto dq_scale = dq_node.Inputs()[1];
+    auto q_scale = q_node.Inputs()[1];
+
+    if (dq_scale != q_scale) {
+      auto dq_scale_value = graph.GetConstant(dq_scale);
+      auto q_scale_value = graph.GetConstant(q_scale);
+      if (!dq_scale_value || !q_scale_value) {
+        break;  // non-const input
+      }
+
+      if (dq_scale_value->Data() != q_scale_value->Data()) {
+        break;
+      }
+    }
+
+    auto dq_zp = dq_node.Inputs().size() > 2 ? dq_node.Inputs()[2] : "";
+    auto q_zp = q_node.Inputs().size() > 2 ? q_node.Inputs()[2] : "";
+
+    if (dq_zp != q_zp) {
+      std::optional<std::unique_ptr<api::TensorRef>> dq_scale_value;
+      std::optional<std::unique_ptr<api::TensorRef>> q_scale_value;
+      if (dq_zp != "") {
+        dq_scale_value = graph.GetConstant(dq_zp);
+        if (!dq_scale_value.value()) {
+          break;  // non-const input
+        }
+      }
+
+      if (q_zp != "") {
+        q_scale_value = graph.GetConstant(q_zp);
+        if (!q_scale_value.value()) {
+          break;  // non-const input
+        }
+      }
+
+      if (dq_scale_value.has_value() && q_scale_value.has_value()) {
+        if (dq_scale_value->get()->Data() != q_scale_value->get()->Data()) {
+          break;
+        }
+      } else {
+        // check the input with a value matches the default zp value of 0
+        if (dq_scale_value.has_value()) {
+          auto data = dq_scale_value->get()->Data();
+          if (!std::all_of(data.begin(), data.end(), [](auto value) { return value == 0; })) {
+            break;
+          }
+        } else {
+          // q_scale_value must have a value to get here
+          auto data = q_scale_value->get()->Data();
+          if (!std::all_of(data.begin(), data.end(), [](auto value) { return value == 0; })) {
+            break;
+          }
+        }
+      }
+    }
+
+    match = true;
+
+  } while (false);
+
+  return match;
+}
+
 // Adds rank to negative axes and checks that axes are unique and within [0, rank). Returns false if invalid.
 static bool NormalizeAndValidateAxes(std::vector<int64_t>& axes, size_t rank) {
   int64_t rank_int = gsl::narrow_cast<int64_t>(rank);
@@ -2571,10 +2654,9 @@ OptimizeResult OptimizeImpl(OptimizerCtx& ctx) {
     return result;
   }
 
-  // Run 'fix up' pass for QDQ node units where we moved a Transpose past a DQ and broke a QDQ node unit,
-  // moved a Transpose past a DQ that provides a graph output, or left an empty Q->DQ pair.
+  // Run 'fix up' pass for QDQ node units.
   //
-  // Repair broken QDQ node unit
+  // Repair broken QDQ node unit from Transpose being blocked on Op inside a QDQ node unit
   //   DQ -> Transpose ->            Op -> Q =>
   //   DQ -> Transpose -> Q -> DQ -> Op -> Q
   //
@@ -2582,7 +2664,7 @@ OptimizeResult OptimizeImpl(OptimizerCtx& ctx) {
   //   DQ -> Transpose ->            graph output =>
   //   DQ -> Transpose -> Q -> DQ -> graph output
   //
-  // Remove empty DQ -> Q pair from moving a Transpose downstream or a Transpose being cancelled out
+  // Remove empty DQ -> Q pair from moving a Transpose downstream or a Transpose being cancelled out.
   //   DQ -> Q -> consumer node =>
   //              consumer node
 
@@ -2602,18 +2684,13 @@ OptimizeResult OptimizeImpl(OptimizerCtx& ctx) {
 
     std::unique_ptr<api::NodeRef> single_consumer_node;
 
-    // remove unnecessary DQ and Q at start of DQ -> Q -> consumer node
+    // remove empty DQ -> Q before a consumer node if the DQ and Q have matching types, scale and zp.
     if (node.OpType() == "QuantizeLinear") {
       auto& dq_node = *input_node;
       auto& q_node = node;
       if (OutputValueHasSingleConsumerNode(ctx.graph, dq_node, 0, single_consumer_node) &&
-          OutputValueHasSingleConsumerNode(ctx.graph, q_node, 0, single_consumer_node)) {
-        // make sure the type, scale or isn't being changed from a preceeding Q
-        auto node_before_dq = ctx.graph.GetNodeProducingOutput(dq_node.Inputs()[0]);
-        if (node_before_dq && node_before_dq->OpType() == "QuantizeLinear") {
-          TODO
-        }
-
+          OutputValueHasSingleConsumerNode(ctx.graph, q_node, 0, single_consumer_node) &&
+          CheckQDQNodePairMatch(ctx.graph, dq_node, q_node)) {
         // connect consumer to DQ input
         single_consumer_node->SetInput(0, dq_node.Inputs()[0]);
 
