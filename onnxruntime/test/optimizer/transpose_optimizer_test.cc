@@ -4409,7 +4409,7 @@ TEST(TransposeOptimizerTests, QnnTransposeReshape) {
   // tests as the filenames for the debug output are hardcoded.
   // check the build output directory for files called `post_layout_transform_step_<step#>.onnx` to see how the graph
   // changes during the layout transformation process.
-  // ASSERT_STATUS_OK(so.config_options.AddConfigEntry(kDebugLayoutTransformation, "1"));
+  ASSERT_STATUS_OK(so.config_options.AddConfigEntry(kDebugLayoutTransformation, "1"));
 
   using InternalTestingEP = onnxruntime::internal_testing_ep::InternalTestingExecutionProvider;
 
@@ -4717,11 +4717,7 @@ TEST(TransposeOptimizerTests, QnnTransposeNonConstBroadcastInput) {
 
   SessionOptions so;
 
-  // enable dumping graph so one test validates that infrastructure works. we don't want to do that in multiple
-  // tests as the filenames for the debug output are hardcoded.
-  // check the build output directory for files called `post_layout_transform_step_<step#>.onnx` to see how the graph
-  // changes during the layout transformation process.
-  ASSERT_STATUS_OK(so.config_options.AddConfigEntry(kDebugLayoutTransformation, "1"));
+  // ASSERT_STATUS_OK(so.config_options.AddConfigEntry(kDebugLayoutTransformation, "1"));
 
   using InternalTestingEP = onnxruntime::internal_testing_ep::InternalTestingExecutionProvider;
 

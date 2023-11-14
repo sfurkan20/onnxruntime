@@ -3334,8 +3334,8 @@ TEST(QDQTransformerTests, QDQPropagation_GH11605_Opset12_19) {
     // QDQ Prop inserts a Q/DQ pair to create a QDQ node group for the Transpose: DQ -> Tr -> Q -> DQ -> SoftM -> Tr
     // Transpose opt phase 1 moves the Tr down until it blocks on the SoftMax: DQ -> Q -> DQ -> Tr -> SoftM -> Tr
     // Transpose opt phase 2 repairs the QDQ node units: DQ -> Q -> DQ -> Tr -> Q -> DQ -> SoftM -> TR
-    // QDQ cleanup in Level2 removes the unnecessary DQ/Q pair at the start: DQ -> Tr -> Q -> DQ -> SoftM -> Tr
-    // This is the preferred result. The Transpose is in a valid QDQ node unit and can be run with 8-bit data.
+    // and removes the unnecessary DQ/Q pair at the start: DQ -> Tr -> Q -> DQ -> SoftM -> Tr
+    // The CPU EP QDQ handling converts the DQ -> Tr -> Q to a Transpose with 8-bit data.
     auto check_graph = [&](InferenceSessionWrapper& session) {
       const QDQOpKeys qdq_keys = GetQDQOpKeys(use_contrib_qdq);
       std::vector<std::string> expected_op_types_in_order{
@@ -3344,8 +3344,13 @@ TEST(QDQTransformerTests, QDQPropagation_GH11605_Opset12_19) {
           "Softmax",
           "Transpose"};
 
-      const auto op_types_in_order = GetNodeOpTypesInTopologicalOrder(session.GetGraph(), true);
+      const auto& graph = session.GetGraph();
+      GraphViewer graph_viewer(graph);
+      const auto op_types_in_order = GetNodeOpTypesInTopologicalOrder(graph, true);
       EXPECT_EQ(op_types_in_order, expected_op_types_in_order);
+
+      auto first_node = graph_viewer.GetNode(graph_viewer.GetNodesInTopologicalOrder().front());
+      EXPECT_EQ(*first_node->InputDefs()[0]->Type(), "tensor(uint8)");
     };
 
     TransformerTester(build_test_case,
