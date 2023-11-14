@@ -67,7 +67,7 @@ def create_model_with_Where():
     cond_0_shape = [3, 2]  # transpose to 2, 3
     cond_1_shape = [2, 3]
     x_0_shape = [3]  # broadcast so Transpose goes through Where0
-    x_1_shape = [3]  # not broadcast so requires negative value for y input for Transpose to go through Where1
+    x_1_shape = [3]  # also broadcast
     y_shape = [3]  # should be transposed and broadcast to [3, 1] if we push the transpose through the Where
     y_values = np.random.randn(3)
 
@@ -95,8 +95,6 @@ def create_model_with_Where():
             # second usage of shared initializer. requires looking past the Squeeze to push the transpose through
             helper.make_node("Where", ["cond_in_1", "Add0", "DQ1"], ["Where1"], "Where1"),
             helper.make_node("Transpose", ["Where1"], ["output0"], perm=[1, 0]),
-            # helper.make_node("Add", ["Where0", "Where1"], ["Add0"], "Add0"),
-            # helper.make_node("Transpose", ["Add0"], ["output0"], perm=[1, 0]),
         ],
         outputs=[
             helper.make_tensor_value_info("output0", TensorProto.FLOAT, [3, 2]),

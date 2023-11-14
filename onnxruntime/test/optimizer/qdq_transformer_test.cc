@@ -1174,10 +1174,6 @@ static void RunDoubleQDQWithoutLastNodeBeingOutput(int output_index, int expecte
   auto graph = [&](InferenceSessionWrapper& session) {
     auto op_to_count = CountOpsInGraph(session.GetGraph());
     const QDQOpKeys qdq_keys = GetQDQOpKeys(use_contrib_qdq);
-    if (op_to_count[qdq_keys.quantize_linear] != expected_Q_count ||
-        op_to_count[qdq_keys.dequantize_linear] != expected_DQ_count) {
-      std::cout << "here";
-    }
     EXPECT_EQ(op_to_count[qdq_keys.quantize_linear], expected_Q_count);
     EXPECT_EQ(op_to_count[qdq_keys.dequantize_linear], expected_DQ_count);
   };
@@ -3104,7 +3100,7 @@ TEST(QDQTransformerTests, QDQPropagation_Per_Layer_No_Propagation) {
       EXPECT_EQ(op_types_in_order, expected_op_types_in_order);
 
       if (use_transpose_optimizer) {
-        // the trailing Q/DQ should have updated axis based on the transpose. default value of 1 moves to 3 with
+        // the trailing Q/DQ should have updated axis based on the transpose. default axis of 1 moves to 3 with
         // transpose of {0,2,3,1} (NCHW -> NHWC)
         GraphViewer graph_viewer{session.GetGraph()};
         const auto& ordered_nodes = graph_viewer.GetNodesInTopologicalOrder();
@@ -3335,7 +3331,7 @@ TEST(QDQTransformerTests, QDQPropagation_GH11605_Opset12_19) {
     // Transpose opt phase 1 moves the Tr down until it blocks on the SoftMax: DQ -> Q -> DQ -> Tr -> SoftM -> Tr
     // Transpose opt phase 2 repairs the QDQ node units: DQ -> Q -> DQ -> Tr -> Q -> DQ -> SoftM -> TR
     // and removes the unnecessary DQ/Q pair at the start: DQ -> Tr -> Q -> DQ -> SoftM -> Tr
-    // The CPU EP QDQ handling converts the DQ -> Tr -> Q to a Transpose with 8-bit data.
+    // The L2 CPU EP QDQ handling converts the DQ -> Tr -> Q to a Transpose with 8-bit data.
     auto check_graph = [&](InferenceSessionWrapper& session) {
       const QDQOpKeys qdq_keys = GetQDQOpKeys(use_contrib_qdq);
       std::vector<std::string> expected_op_types_in_order{

@@ -4580,10 +4580,10 @@ static void CheckSharedInitializerHandling(bool broadcast) {
     ASSERT_EQ(result.error_msg, std::nullopt);
     ASSERT_TRUE(result.graph_modified);
     ASSERT_TRUE(graph.GraphResolveNeeded());
+    ASSERT_STATUS_OK(graph.Resolve());
 
-    // Use this to save if needed
-    // auto& m = session.GetModel();
-    // ASSERT_STATUS_OK(Model::Save(const_cast<Model&>(m), "updated_model.onnx"));
+    // Use this hack to save model for viewing if needed
+    // ASSERT_STATUS_OK(Model::Save(const_cast<Model&>(session.GetModel()), "updated_model.onnx"));
 
     std::map<std::string, int> op_to_count = CountOpsInGraph(graph);
     EXPECT_EQ(op_to_count["Transpose"], 0) << "The Transpose nodes should have been pushed through or canceled out.";
@@ -4591,7 +4591,6 @@ static void CheckSharedInitializerHandling(bool broadcast) {
       EXPECT_EQ(op_to_count["Unsqueeze"], 0) << "Any Unsqueeze nodes should have been canceled out.";
     }
 
-    ASSERT_STATUS_OK(graph.Resolve());
     ASSERT_STATUS_OK(session.Initialize());
     ASSERT_STATUS_OK(session.Run(feeds, output_names, &fetches));
   }
@@ -4686,7 +4685,7 @@ TEST(TransposeOptimizerTests, SharedInitializerHandlingBroadcast2) {
     ASSERT_TRUE(graph.GraphResolveNeeded());
     ASSERT_STATUS_OK(graph.Resolve());
 
-    // Use this to save if needed
+    // Use this hack to save model for viewing if needed
     // ASSERT_STATUS_OK(Model::Save(const_cast<Model&>(session.GetModel()), updated_model.onnx"));
 
     // Pushing the initial Transpose through the 2 Where nodes results in
