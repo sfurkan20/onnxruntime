@@ -4581,11 +4581,13 @@ static void CheckSharedInitializerHandling(bool broadcast) {
     ASSERT_EQ(result.error_msg, std::nullopt);
     ASSERT_TRUE(result.graph_modified);
     ASSERT_TRUE(graph.GraphResolveNeeded());
+    ASSERT_STATUS_OK(graph.Resolve());
 
     std::map<std::string, int> op_to_count = CountOpsInGraph(graph);
-    EXPECT_EQ(op_to_count["Transpose"], 0) << "The Transpose nodes should have been pushed through and canceled out.";
-
-    ASSERT_STATUS_OK(graph.Resolve());
+    EXPECT_EQ(op_to_count["Transpose"], 0) << "The Transpose nodes should have been pushed through or canceled out.";
+    if (broadcast) {
+      EXPECT_EQ(op_to_count["Unsqueeze"], 0) << "Any Unsqueeze nodes should have been canceled out.";
+    }
 
     ASSERT_STATUS_OK(session.Initialize());
     ASSERT_STATUS_OK(session.Run(feeds, output_names, &fetches));

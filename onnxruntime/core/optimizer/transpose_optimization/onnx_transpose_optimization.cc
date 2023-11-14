@@ -228,28 +228,9 @@ static std::unique_ptr<api::NodeRef> GetDQWithConstInitializerInputAndSingleCons
 }
 
 /// <summary>
-/// Look past a Q -> DQ pair and return the following node.
-/// Requires the Q and DQ outputs to have a single consumer node, which is the expected usage.
-/// </summary>
-/// <param name="node">Node to look past.</param>
-/// <param name="output_idx">Output index of node to look past.</param>
-/// <returns>Node following Q -> DQ if found, otherwise nullptr.</returns>
-// std::unique_ptr<api::NodeRef> LookPastQDQPair(api::GraphRef& graph, api::NodeRef& node, size_t output_idx) {
-//   std::unique_ptr<api::NodeRef> maybe_dq_node;
-//   std::unique_ptr<api::NodeRef> next_real_node;
-//   if (node.OpType() == "QuantizeLinear" && OutputValueHasSingleConsumerNode(graph, node, output_idx, maybe_dq_node) &&
-//       maybe_dq_node->OpType() == "DequantizeLinear" &&
-//       OutputValueHasSingleConsumerNode(graph, *maybe_dq_node, 0, next_real_node)) {
-//     // next_real_node now contains what we want to return
-//   }
-//
-//   return next_real_node;
-// }
-
-/// <summary>
 /// Insert a Q -> DQ pair after the node following the DQ by using scale and zp info from the preceding DQ node.
 /// DQ -> next node => DQ -> next node -> Q -> DQ.
-/// The next node must only have one output.
+/// This is only called for Transpose, Unsqueeze and Gather nodes.
 /// </summary>
 /// <param name="dq_node">DQ node.</param>
 /// <param name="next_node">Node following DQ node.</param>
@@ -263,7 +244,7 @@ static bool MakeQDQNodeUnit(api::GraphRef& graph, const api::NodeRef& dq_node) {
   }
 
   auto& next_node = *single_consumer_node;
-  assert(next_node.Outputs().size() == 1);  // we only expect to use this for Gather/Unsqueeze/Transpose nodes we added
+  assert(next_node.OpType() == "Transpose" || next_node.OpType() == "Unsqueeze" || next_node.OpType() == "Gather");
 
   const auto dq_domain = dq_node.Domain();
   const auto& dq_inputs = dq_node.Inputs();
@@ -308,7 +289,7 @@ static bool MakeQDQNodeUnit(api::GraphRef& graph, const api::NodeRef& dq_node) {
     inputs.push_back(zp_input.value());
   }
 
-  // Add Q and copy ValueInfo
+  // Add Q
   auto new_q_node = MakeQOrDQ(graph, dq_domain, "QuantizeLinear", inputs, axis);
   auto q_node_outputs = new_q_node->Outputs();
 
@@ -320,14 +301,14 @@ static bool MakeQDQNodeUnit(api::GraphRef& graph, const api::NodeRef& dq_node) {
   // update input to connect the DQ to the Q we just added. re-use scale and zp.
   inputs[0] = new_q_node->Outputs()[0];
 
-  // Add DQ and copy ValueInfo
+  // Add DQ
   auto new_dq_node = MakeQOrDQ(graph, dq_domain, "DequantizeLinear", inputs, axis);
   auto dq_node_outputs = new_dq_node->Outputs();
 
   // straight copy of value info as the type and shape are the same as next_node's output
   graph.CopyValueInfo(next_node_output_name, dq_node_outputs[0]);
 
-  // move next_node output to the new DQ node and connect next_node with the new Q node
+  // move next_node output to the new DQ node in case it was a graph output, and connect next_node with the new Q node
   graph.MoveOutput(next_node, 0, *new_dq_node, 0);
   auto new_next_node_output_name = next_node.Outputs()[0];
   new_q_node->SetInput(0, new_next_node_output_name);
@@ -689,19 +670,6 @@ static void UnsqueezeInput(OptimizerCtx& ctx, api::NodeRef& node, size_t i, cons
     // to counteract its effect. If they later Unsqueeze the same input, the Squeeze nodes will simply be deleted
     // (see Case 2).
     if (consumers->nodes.size() > 0) {
-      // record the consumer node input as being special cased for use in Case 2 if a DQ node, and IsConstant
-      // for (auto& consumer : consumers->nodes) {
-      //  auto& consumer_node_inputs = ctx.nodes_using_updated_shared_initializer[consumer->Id()];
-
-      //  // find input id/s for consumer
-      //  auto consumer_inputs = consumer->Inputs();
-      //  for (size_t input_idx = 0; input_idx < consumer_inputs.size(); ++input_idx) {
-      //    if (consumer_inputs[input_idx] == value_to_modify) {
-      //      consumer_node_inputs.push_back(input_idx);
-      //    }
-      //  }
-      //}
-
       auto squeeze_ptr = MakeSqueezeOrUnsqueeze(ctx.opset, ctx.graph, "Squeeze", value_to_modify, axes);
       api::NodeRef& squeeze = *squeeze_ptr;
       std::string_view sq_out = squeeze.Outputs()[0];
@@ -723,21 +691,8 @@ static void UnsqueezeInput(OptimizerCtx& ctx, api::NodeRef& node, size_t i, cons
   // Case 2: input is a Squeeze node with matching axes
   std::unique_ptr<api::NodeRef> inp_node = ctx.graph.GetNodeProducingOutput(input);
 
-  // check if this is a special-cased DQ node where we put the Squeeze on input 0 of the DQ in 'Case 1' above
-  if (inp_node && inp_node->OpType() == "DequantizeLinear"
-      //&&
-      // std::find_if(ctx.nodes_using_updated_shared_initializer.begin(),  // TODO: Do we even need this check or is a simple look-past any DQ just as good?
-      //             ctx.nodes_using_updated_shared_initializer.end(),
-      //             [&inp_node](const auto& entry) {
-      //               const auto id = entry.first;
-      //               const auto& input_idxs = entry.second;
-      //               // check Id matches and the entry was for input 0 of the DQ node
-      //               return id == inp_node->Id() &&
-      //                      std::find(input_idxs.begin(), input_idxs.end(), size_t(0)) != input_idxs.end();
-      //             }) != ctx.nodes_using_updated_shared_initializer.end()
-  ) {
-    // set things up so we can look past the DQ node to the Squeeze that was inserted in front of the reshaped
-    // constant initializer that was shared with this node.
+  // look past a DQ node for a Squeeze to cancel
+  if (inp_node && inp_node->OpType() == "DequantizeLinear") {
     dq_node = std::move(inp_node);
     auto dq_input = dq_node->Inputs()[0];
     inp_node = ctx.graph.GetNodeProducingOutput(dq_input);
@@ -778,34 +733,32 @@ static void UnsqueezeInput(OptimizerCtx& ctx, api::NodeRef& node, size_t i, cons
     inp_node = std::move(dq_node);
   }
 
-  do {
-    // Case 3: Add an Unsqueeze node.
-    auto unsqueeze_ptr = MakeSqueezeOrUnsqueeze(ctx.opset, ctx.graph, "Unsqueeze", input, axes);
-    api::NodeRef& unsqueeze = *unsqueeze_ptr;
-    std::string_view unsq_out = unsqueeze.Outputs()[0];
-    ctx.graph.CopyValueInfo(input, unsq_out);
-    ctx.graph.GetValueInfo(unsq_out)->UnsqueezeDims(axes);
+  // Case 3: Add an Unsqueeze node.
+  auto unsqueeze_ptr = MakeSqueezeOrUnsqueeze(ctx.opset, ctx.graph, "Unsqueeze", input, axes);
+  api::NodeRef& unsqueeze = *unsqueeze_ptr;
+  std::string_view unsq_out = unsqueeze.Outputs()[0];
+  ctx.graph.CopyValueInfo(input, unsq_out);
+  ctx.graph.GetValueInfo(unsq_out)->UnsqueezeDims(axes);
 
-    // The transpose optimizer attempts to complete all optimization in a single pass. Adding Unsqueeze ops to inputs
-    // is one of the few operations that violates the normal traversal order. If the input to the new Unsqueeze is
-    // a Transpose, optimize it here.
-    if (inp_node != nullptr && inp_node->IsOp("Transpose")) {
-      auto perm = GetPermAttrIfValid(*inp_node);
-      if (perm.has_value()) {
-        auto perm_inv = InvertPerm(*perm);
-        std::vector<size_t> indices = {0};
-        HandlerArgs args{ctx, *inp_node, unsqueeze, *perm, perm_inv, indices};
-        const auto new_input = HelpHandleUnsqueeze(args, axes);
-        // Use output from optimization (likely from pushed transpose)
-        node.SetInput(i, new_input);
-        return;
-      }
+  // The transpose optimizer attempts to complete all optimization in a single pass. Adding Unsqueeze ops to inputs
+  // is one of the few operations that violates the normal traversal order. If the input to the new Unsqueeze is
+  // a Transpose, optimize it here.
+  if (inp_node != nullptr && inp_node->IsOp("Transpose")) {
+    auto perm = GetPermAttrIfValid(*inp_node);
+    if (perm.has_value()) {
+      auto perm_inv = InvertPerm(*perm);
+      std::vector<size_t> indices = {0};
+      HandlerArgs args{ctx, *inp_node, unsqueeze, *perm, perm_inv, indices};
+      const auto new_input = HelpHandleUnsqueeze(args, axes);
+      // Use output from optimization (likely from pushed transpose)
+      node.SetInput(i, new_input);
+      return;
     }
+  }
 
-    node.SetInput(i, unsq_out);
-  } while (false);
+  node.SetInput(i, unsq_out);
 
-  if (inp_node && inp_node->OpType() == "DequantizeLinear") {
+  if (inp_node != nullptr && inp_node->OpType() == "DequantizeLinear") {
     MakeQDQNodeUnit(ctx.graph, *inp_node);
   }
 }
@@ -835,10 +788,8 @@ static void Permute1DConstant(api::GraphRef& graph, api::NodeRef& node, api::Ten
 
 // Replaces ith input to node with transposed value. Might create a new Transpose node, find an existing one,
 // or transpose an initializer.
-static void TransposeInputImpl(api::GraphRef& graph,
-                               NodeIdToInputIdxsMap* /*nodes_using_updated_shared_initializer*/,
-                               api::NodeRef& node, size_t i, const std::vector<int64_t>& perm,
-                               const std::vector<int64_t>& perm_inv) {
+static void TransposeInputImpl(api::GraphRef& graph, api::NodeRef& node, size_t i,
+                               const std::vector<int64_t>& perm, const std::vector<int64_t>& perm_inv) {
   std::string_view input = node.Inputs()[i];
 
   // Only local constants are editable
@@ -910,22 +861,6 @@ static void TransposeInputImpl(api::GraphRef& graph,
     if (consumers->nodes.size() > 0) {
       // Transpose the initializer. If there are existing consumers, add Transpose nodes to them using perm_inv
       // to counteract the effect. These Transposes will hopefully be optimized out later.
-
-      // record the consumer node's input as being special cased for use in Case 2 if a DQ node, and IsConstant
-      // if (nodes_using_updated_shared_initializer) {
-      //  for (auto& consumer : consumers->nodes) {
-      //    auto& consumer_node_inputs = (*nodes_using_updated_shared_initializer)[consumer->Id()];
-
-      //    // find input id/s for consumer
-      //    auto consumer_inputs = consumer->Inputs();
-      //    for (size_t input_idx = 0; input_idx < consumer_inputs.size(); ++input_idx) {
-      //      if (consumer_inputs[input_idx] == constant_to_modify) {
-      //        consumer_node_inputs.push_back(input_idx);
-      //      }
-      //    }
-      //  }
-      //}
-
       auto transpose_inv_ptr = MakeTranspose(graph, constant_to_modify, perm_inv);
       api::NodeRef& transpose_inv = *transpose_inv_ptr;
       std::string_view transpose_out = transpose_inv.Outputs()[0];
@@ -946,23 +881,8 @@ static void TransposeInputImpl(api::GraphRef& graph,
   // Case 2: input is a Transpose node
   std::unique_ptr<api::NodeRef> inp_node = graph.GetNodeProducingOutput(input);
 
-  // TODO: Is simple always look past DQ sufficient?
-
-  // check if this is a special-cased DQ node where we put the Transpose on input 0 of the DQ in 'Case 1' above
-  if (inp_node && inp_node->OpType() == "DequantizeLinear"
-      //&&
-      // nodes_using_updated_shared_initializer &&
-      // std::find_if(nodes_using_updated_shared_initializer->begin(), nodes_using_updated_shared_initializer->end(),
-      //             [&inp_node](const auto entry) {
-      //               const auto id = entry.first;
-      //               const auto& input_idxs = entry.second;
-      //               // id matches and the entry is for input 0 of the DQ node
-      //               return id == inp_node->Id() &&
-      //                      std::find(input_idxs.begin(), input_idxs.end(), size_t(0)) != input_idxs.end();
-      //             }) != nodes_using_updated_shared_initializer->end()
-  ) {
-    // set things up so we can look past the DQ node to the Transpose that was inserted in front of the reshaped
-    // constant initializer that was shared with this node.
+  // Look past a DQ for the Transpose
+  if (inp_node && inp_node->OpType() == "DequantizeLinear") {
     dq_node = std::move(inp_node);
     auto dq_input = dq_node->Inputs()[0];
     inp_node = graph.GetNodeProducingOutput(dq_input);
@@ -993,12 +913,6 @@ static void TransposeInputImpl(api::GraphRef& graph,
         return;
       }
 
-      // NOTE: We expect the Transpose to cancel out when handling a special-cased DQ node that was originally
-      // connected to a shared constant initializer, so we don't expect to get here if dq_node is not nullptr.
-      // If there was a dq_node where the Transpose didn't cancel out we fall through to the next case
-      // so we retain the potential to cancel out for any other usages of the shared initializer.
-      assert(!dq_node);  // assert in debug build to investigate. fall through to next case in release build to be safe.
-
       if (!dq_node) {
         // Otherwise, compose the perm and Transpose pre_transpose_value. Cost is the same and we may be able to remove
         // the other Transpose.
@@ -1016,6 +930,8 @@ static void TransposeInputImpl(api::GraphRef& graph,
         node.SetInput(i, transpose_out);
 
         return;
+      } else {
+        // fall through to regular processing if the Transpose prior to the DQ doesn't cancel out cleanly
       }
     }
   }
@@ -1048,17 +964,17 @@ static void TransposeInputImpl(api::GraphRef& graph,
   }
 }
 
+// this TransposeInput is used by the layout transformer to wrap a node in Transpose ops.
+// there's no OptimizerCtx in that scenario
 void TransposeInput(api::GraphRef& graph, api::NodeRef& node, size_t i,
                     const std::vector<int64_t>& perm,
                     const std::vector<int64_t>& perm_inv) {
-  // this TransposeInput is used by the layout transformer to wrap a node in Transpose ops. there's no OptimizerCtx
-  // in that scenario and we're not tracking special-cased DQ nodes as we only do that when pushing Transpose nodes.
-  TransposeInputImpl(graph, /* nodes_using_updated_shared_initializer */ nullptr, node, i, perm, perm_inv);
+  TransposeInputImpl(graph, node, i, perm, perm_inv);
 }
 
 static void TransposeInput(OptimizerCtx& ctx, api::NodeRef& node, size_t i, const std::vector<int64_t>& perm,
                            const std::vector<int64_t>& perm_inv) {
-  TransposeInputImpl(ctx.graph, &ctx.nodes_using_updated_shared_initializer, node, i, perm, perm_inv);
+  TransposeInputImpl(ctx.graph, node, i, perm, perm_inv);
 }
 
 // Unsqueezes inputs of node to have uniform rank. Returns false if input ranks are unknown or exceed the target rank.
@@ -1200,87 +1116,47 @@ static bool CanLikelyRemoveTranspose(const api::GraphRef& graph, api::NodeRef& t
 //     in-place update. if we push the same transpose through this node it should cancel out that Squeeze/Transpose
 //
 // in all these cases we expect pushing the transpose through to not require a runtime Transpose node
-static bool IsConstant(const api::GraphRef& graph, const api::NodeRef& node,
-                       size_t input_id,
-                       std::string_view value_name,
-                       const NodeIdToInputIdxsMap& /*nodes_using_updated_shared_initializer*/) {
+static bool IsConstant(const api::GraphRef& graph, std::string_view value_name) {
   std::unique_ptr<api::NodeRef> producer_node = graph.GetNodeProducingOutput(value_name);
 
   if (!producer_node) {
-    // initializer. may or may not be constant depending on whether it has a matching graph input
+    // initializer or graph input.
+    // initializer may or may not be constant depending on whether it has a matching graph input
     std::unique_ptr<api::TensorRef> constant = graph.GetConstant(value_name);
     return constant != nullptr;
   }
 
-  auto node_id_to_check = node.Id();
-
-  // handle potentially looking past a DQ node
+  // look past a DQ node
   if (producer_node->OpType() == "DequantizeLinear") {
     std::unique_ptr<api::NodeRef> dq_node = GetDQWithConstInitializerInputAndSingleConsumer(graph, value_name);
     if (dq_node != nullptr) {
-      // DQ node pointing to an initializer that has not been updated in-place yet
+      // DQ node pointing to an constant initializer
       return true;
     }
-
-    // could also be a DQ that was connected to a shared initializer that was updated in-place.
-    // update the info on the node/input index to check and fall through
-    node_id_to_check = producer_node->Id();
-    input_id = 0;  // can only be input 0 of a DQ node
   }
-
-  // auto entry = nodes_using_updated_shared_initializer.find(node_id_to_check);
-  // if (entry != nodes_using_updated_shared_initializer.end()) {
-  //   if (std::find(entry->second.begin(), entry->second.end(), input_id) != entry->second.end()) {
-  //     return true;
-  //   }
-  // }
 
   return false;
 }
 
 // Estimates the cost of transposing an input. Currently uses rank heuristic. Negative if transpose is removed.
 // Feel free to improve as needed.
-static int EstimateTransposeValueCost(const api::GraphRef& graph, const api::NodeRef& node,
-                                      size_t input_id, std::string_view input,
-                                      const std::vector<int64_t>& perm_inv,
-                                      const HandlerMap& extended_handlers,
-                                      const NodeIdToInputIdxsMap& nodes_using_updated_shared_initializer) {
+static int EstimateTransposeValueCost(const api::GraphRef& graph, std::string_view input,
+                                      const std::vector<int64_t>& perm_inv, const HandlerMap& extended_handlers) {
   // Case 1: Transposing constants probably costs nothing.
-  if (IsConstant(graph, node, input_id, input, nodes_using_updated_shared_initializer)) {
+  if (IsConstant(graph, input)) {
     return 0;
   }
 
   // Case 2: Transposing a transpose either cancels it or composes the permutations.
   std::unique_ptr<api::NodeRef> producer_node = graph.GetNodeProducingOutput(input);
 
-  if (producer_node != nullptr) {
-    // look past a Q -> DQ or DQ  for a Transpose node
-    // if that is the case we know the Transpose can be pushed through the Q and DQ nodes.
-    std::unique_ptr<api::NodeRef> prev_real_node;
-
-    // match onnx and contrib ops domain for Q/DQ while we have those ops in both domains
-    if (producer_node->OpType() == "DequantizeLinear") {
-      auto dq_input_node = graph.GetNodeProducingOutput(producer_node->Inputs()[0]);
-      if (dq_input_node) {
-        if (dq_input_node->OpType() == "QuantizeLinear") {
-          auto q_input_node = graph.GetNodeProducingOutput(dq_input_node->Inputs()[0]);
-          if (q_input_node) {
-            producer_node = std::move(q_input_node);
-          }
-        } else if (dq_input_node->IsOp("Transpose")) {
-          producer_node = std::move(dq_input_node);
-        }
-      }
-    }
-
-    if (producer_node->IsOp("Transpose")) {
-      std::optional<std::vector<int64_t>> perm2 = GetPermAttrIfValid(*producer_node);
-      if (perm2 != std::nullopt) {
-        if (*perm2 == perm_inv && CanLikelyRemoveTranspose(graph, *producer_node, extended_handlers)) {
-          return -EstimateValueRank(graph, input);
-        } else {
-          return 0;
-        }
+  if (producer_node != nullptr && producer_node->IsOp("Transpose")) {
+    std::optional<std::vector<int64_t>> perm2 = GetPermAttrIfValid(*producer_node);
+    if (perm2 != std::nullopt) {
+      if (*perm2 == perm_inv && CanLikelyRemoveTranspose(graph, *producer_node, extended_handlers)) {
+        return -EstimateValueRank(graph, input);
+      } else {
+        return 0;
       }
     }
   }
@@ -1293,17 +1169,11 @@ static int EstimateTransposeValueCost(const api::GraphRef& graph, const api::Nod
 static int EstimateTransposeInputsCost(const api::GraphRef& graph, const api::NodeRef& node,
                                        const std::vector<int64_t>& perm_inv,
                                        const std::vector<size_t>& input_indices,
-                                       const HandlerMap& extended_handlers,
-                                       const NodeIdToInputIdxsMap& nodes_using_updated_shared_initializer) {
+                                       const HandlerMap& extended_handlers) {
   auto inputs = node.Inputs();
   int cost = 0;
   for (size_t j : input_indices) {
-    cost += EstimateTransposeValueCost(graph, node, j, inputs[j], perm_inv, extended_handlers,
-                                       nodes_using_updated_shared_initializer);
-  }
-
-  if (node.OpType() == "Mul") {
-    std::cout << "M";
+    cost += EstimateTransposeValueCost(graph, inputs[j], perm_inv, extended_handlers);
   }
 
   return cost;
@@ -2379,14 +2249,12 @@ static int CalculateCost(const api::GraphRef& graph, const api::NodeRef& node,
                          const std::unordered_set<std::string>& outputs_leading_to_transpose,
                          const HandlerInfo& info,
                          const std::vector<size_t>& input_indices,
-                         const HandlerMap& extended_handlers,
-                         const NodeIdToInputIdxsMap& nodes_using_updated_shared_initializer) {
+                         const HandlerMap& extended_handlers) {
   // We require the input cost (number of transposes before the op) and the total cost to strictly decrease.
   // Strict decrease of the input cost ensures the optimization is stable, since the total cost decrease is just an
   // estimate (the transpose after the op may or may not cancel with a subsequent transpose). We don't want
   // repeated runs of the optimizer to have a transpose toggle between two inputs of a binary op.
-  int cost = EstimateTransposeInputsCost(graph, node, perm, input_indices, extended_handlers,
-                                         nodes_using_updated_shared_initializer);
+  int cost = EstimateTransposeInputsCost(graph, node, perm, input_indices, extended_handlers);
 
   if (cost < 0 && info.transposes_outputs) {
     // If the output will be transposed and won't ultimately cancel, factor in that cost.
@@ -2416,14 +2284,13 @@ static bool DefaultCostCheck(const api::GraphRef& graph, const api::NodeRef& nod
                              const std::unordered_set<std::string>& outputs_leading_to_transpose,
                              const HandlerInfo& info,
                              const std::vector<size_t> transposable_input_indices,
-                             const HandlerMap& extended_handlers,
-                             const NodeIdToInputIdxsMap& nodes_using_updated_shared_initializer) {
+                             const HandlerMap& extended_handlers) {
   if (node.IsOp("Transpose")) {
     return true;
   }
 
   int cost = CalculateCost(graph, node, perm, outputs_leading_to_transpose, info, transposable_input_indices,
-                           extended_handlers, nodes_using_updated_shared_initializer);
+                           extended_handlers);
   return cost < 0;
 }
 
@@ -2444,7 +2311,7 @@ static bool ShouldProcessTranspose(OptimizerCtx& ctx, api::NodeRef& node,
 
   if (cost == CostCheckResult::kFallThrough) {
     cost = DefaultCostCheck(ctx.graph, node, perm, outputs_leading_to_transpose, info, input_indices,
-                            ctx.extended_handlers, ctx.nodes_using_updated_shared_initializer)
+                            ctx.extended_handlers)
                ? CostCheckResult::kPushTranspose
                : CostCheckResult::kStop;
   }
@@ -2464,41 +2331,6 @@ bool ProcessTranspose(OptimizerCtx& ctx, api::NodeRef& transpose, api::NodeRef& 
   if (info == nullptr) {
     return false;
   }
-
-  // Special-case a Transpose in a QDQ node unit by looking through to the operator in the next QDQ node unit.
-  // If we can't push through that, it's better to leave the Transpose where it is.
-  // e.g. look at next_real_node in this sequence: Transpose -> Q -> DQ -> next_real_node -> Q
-  //
-  // TODO: This optimization doesn't apply if the Transpose is not in a QDQ node unit. It's simpler/easier to just
-  //       push all the way down
-  // std::unique_ptr<api::NodeRef> maybe_dq_node;
-  // if (node.OpType() == "QuantizeLinear" && OutputValueHasSingleConsumerNode(ctx.graph, node, 0, maybe_dq_node) &&
-  //    maybe_dq_node->OpType() == "DequantizeLinear") {
-  //  auto& dq_node = *maybe_dq_node;
-  //  auto dq_output = dq_node.Outputs()[0];
-
-  //  std::unique_ptr<api::NodeRef> next_real_node;
-  //  if (OutputValueHasSingleConsumerNode(ctx.graph, dq_node, 0, next_real_node)) {
-  //    const HandlerInfo* next_info = GetHandler(*next_real_node, ctx.extended_handlers);
-  //    if (next_info) {
-  //      std::vector<size_t> next_input_indices = next_info->transposible_inputs_fn(ctx, *next_real_node);
-
-  //      // in theory the DQ could feed multiple inputs of the next node. unlikely, but low cost to check them all
-  //      size_t next_node_input_idx = 0;
-  //      for (const auto input_name : next_real_node->Inputs()) {
-  //        if ((input_name == dq_output) && !ShouldProcessTranspose(ctx, *next_real_node, perm, next_node_input_idx,
-  //                                                                 outputs_leading_to_transpose,
-  //                                                                 *next_info, next_input_indices)) {
-  //          return false;
-  //        }
-
-  //        ++next_node_input_idx;
-  //      }
-  //    }
-  //  }
-
-  //  // fall through to standard processing to check the DQ node for the sake of completeness
-  //}
 
   std::vector<size_t> input_indices = info->transposible_inputs_fn(ctx, node);
   if (!ShouldProcessTranspose(ctx, node, perm, transpose_input_index, outputs_leading_to_transpose,
@@ -2531,7 +2363,7 @@ std::optional<OptimizerCtx> MakeOptimizerContext(api::GraphRef& graph,
     return std::nullopt;
   }
 
-  OptimizerCtx ctx{*opset, graph, provider_type, cost_check_fn, extended_handlers, {}};
+  OptimizerCtx ctx{*opset, graph, provider_type, cost_check_fn, extended_handlers};
   return ctx;
 }
 
@@ -2658,11 +2490,11 @@ OptimizeResult OptimizeImpl(OptimizerCtx& ctx) {
 
   // Run 'fix up' pass for QDQ node units.
   //
-  // Repair broken QDQ node unit from Transpose being blocked on Op inside a QDQ node unit
+  // Repair broken QDQ node unit from Transpose being blocked on Op inside a QDQ node unit.
   //   DQ -> Transpose ->            Op -> Q =>
   //   DQ -> Transpose -> Q -> DQ -> Op -> Q
   //
-  // Create QDQ node unit for Transpose after DQ that provides graph output
+  // Create QDQ node unit for Transpose after DQ that provides graph output.
   //   DQ -> Transpose ->            graph output =>
   //   DQ -> Transpose -> Q -> DQ -> graph output
   //
@@ -2693,7 +2525,7 @@ OptimizeResult OptimizeImpl(OptimizerCtx& ctx) {
       if (OutputValueHasSingleConsumerNode(ctx.graph, dq_node, 0, single_consumer_node) &&
           OutputValueHasSingleConsumerNode(ctx.graph, q_node, 0, single_consumer_node) &&
           CheckQDQNodePairMatch(ctx.graph, dq_node, q_node)) {
-        // connect consumer to DQ input
+        // connect Q consumer to DQ input
         single_consumer_node->SetInput(0, dq_node.Inputs()[0]);
 
         // disconnect other nodes and remove
@@ -2728,20 +2560,6 @@ OptimizeResult OptimizeImpl(OptimizerCtx& ctx) {
           // already in QDQ node unit
           continue;
         }
-
-        // 2 cases:
-        // Broken QDQ node unit where Transpose is inside
-        //   DQ -> Transpose -> Op -> Q
-        // Or a Transpose has pushed past a DQ. If there's a single consumer we can make a QDQ ndoe unit
-        // for the Transpose. Given this, checking Op and Q isn't necessary.
-        //
-        // auto& qdq_node_unit_target_node = *consumers->nodes[0];
-        // if (!OutputValueHasSingleConsumerNode(ctx.graph, qdq_node_unit_target_node, 0, single_consumer_node) ||
-        //    !single_consumer_node ||
-        //    single_consumer_node->OpType() != "QuantizeLinear") {
-        //  // not a broken QDQ node unit
-        //  continue;
-        //}
       }
 
       // Add Q -> DQ after the DQ -> Transpose
