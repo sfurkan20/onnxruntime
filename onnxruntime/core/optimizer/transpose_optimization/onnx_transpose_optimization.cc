@@ -234,17 +234,17 @@ static std::unique_ptr<api::NodeRef> GetDQWithConstInitializerInputAndSingleCons
 /// <param name="node">Node to look past.</param>
 /// <param name="output_idx">Output index of node to look past.</param>
 /// <returns>Node following Q -> DQ if found, otherwise nullptr.</returns>
-std::unique_ptr<api::NodeRef> LookPastQDQPair(api::GraphRef& graph, api::NodeRef& node, size_t output_idx) {
-  std::unique_ptr<api::NodeRef> maybe_dq_node;
-  std::unique_ptr<api::NodeRef> next_real_node;
-  if (node.OpType() == "QuantizeLinear" && OutputValueHasSingleConsumerNode(graph, node, output_idx, maybe_dq_node) &&
-      maybe_dq_node->OpType() == "DequantizeLinear" &&
-      OutputValueHasSingleConsumerNode(graph, *maybe_dq_node, 0, next_real_node)) {
-    // next_real_node now contains what we want to return
-  }
-
-  return next_real_node;
-}
+// std::unique_ptr<api::NodeRef> LookPastQDQPair(api::GraphRef& graph, api::NodeRef& node, size_t output_idx) {
+//   std::unique_ptr<api::NodeRef> maybe_dq_node;
+//   std::unique_ptr<api::NodeRef> next_real_node;
+//   if (node.OpType() == "QuantizeLinear" && OutputValueHasSingleConsumerNode(graph, node, output_idx, maybe_dq_node) &&
+//       maybe_dq_node->OpType() == "DequantizeLinear" &&
+//       OutputValueHasSingleConsumerNode(graph, *maybe_dq_node, 0, next_real_node)) {
+//     // next_real_node now contains what we want to return
+//   }
+//
+//   return next_real_node;
+// }
 
 /// <summary>
 /// Insert a Q -> DQ pair after the node following the DQ by using scale and zp info from the preceding DQ node.
@@ -2467,36 +2467,38 @@ bool ProcessTranspose(OptimizerCtx& ctx, api::NodeRef& transpose, api::NodeRef& 
 
   // Special-case a Transpose in a QDQ node unit by looking through to the operator in the next QDQ node unit.
   // If we can't push through that, it's better to leave the Transpose where it is.
-  // e.g. look at next_real_node in this sequence: DQ -> Transpose -> Q -> DQ -> next_real_node -> Q
-  // auto node_past_q_dq = LookPastQDQPair(graph, node, )
-  std::unique_ptr<api::NodeRef> maybe_dq_node;
-  if (node.OpType() == "QuantizeLinear" && OutputValueHasSingleConsumerNode(ctx.graph, node, 0, maybe_dq_node) &&
-      maybe_dq_node->OpType() == "DequantizeLinear") {
-    auto& dq_node = *maybe_dq_node;
-    auto dq_output = dq_node.Outputs()[0];
+  // e.g. look at next_real_node in this sequence: Transpose -> Q -> DQ -> next_real_node -> Q
+  //
+  // TODO: This optimization doesn't apply if the Transpose is not in a QDQ node unit. It's simpler/easier to just
+  //       push all the way down
+  // std::unique_ptr<api::NodeRef> maybe_dq_node;
+  // if (node.OpType() == "QuantizeLinear" && OutputValueHasSingleConsumerNode(ctx.graph, node, 0, maybe_dq_node) &&
+  //    maybe_dq_node->OpType() == "DequantizeLinear") {
+  //  auto& dq_node = *maybe_dq_node;
+  //  auto dq_output = dq_node.Outputs()[0];
 
-    std::unique_ptr<api::NodeRef> next_real_node;
-    if (OutputValueHasSingleConsumerNode(ctx.graph, dq_node, 0, next_real_node)) {
-      const HandlerInfo* next_info = GetHandler(*next_real_node, ctx.extended_handlers);
-      if (next_info) {
-        std::vector<size_t> next_input_indices = next_info->transposible_inputs_fn(ctx, *next_real_node);
+  //  std::unique_ptr<api::NodeRef> next_real_node;
+  //  if (OutputValueHasSingleConsumerNode(ctx.graph, dq_node, 0, next_real_node)) {
+  //    const HandlerInfo* next_info = GetHandler(*next_real_node, ctx.extended_handlers);
+  //    if (next_info) {
+  //      std::vector<size_t> next_input_indices = next_info->transposible_inputs_fn(ctx, *next_real_node);
 
-        // in theory the DQ could feed multiple inputs of the next node. unlikely, but low cost to check them all
-        size_t next_node_input_idx = 0;
-        for (const auto input_name : next_real_node->Inputs()) {
-          if ((input_name == dq_output) && !ShouldProcessTranspose(ctx, *next_real_node, perm, next_node_input_idx,
-                                                                   outputs_leading_to_transpose,
-                                                                   *next_info, next_input_indices)) {
-            return false;
-          }
+  //      // in theory the DQ could feed multiple inputs of the next node. unlikely, but low cost to check them all
+  //      size_t next_node_input_idx = 0;
+  //      for (const auto input_name : next_real_node->Inputs()) {
+  //        if ((input_name == dq_output) && !ShouldProcessTranspose(ctx, *next_real_node, perm, next_node_input_idx,
+  //                                                                 outputs_leading_to_transpose,
+  //                                                                 *next_info, next_input_indices)) {
+  //          return false;
+  //        }
 
-          ++next_node_input_idx;
-        }
-      }
-    }
+  //        ++next_node_input_idx;
+  //      }
+  //    }
+  //  }
 
-    // fall through to standard processing to check the DQ node for the sake of completeness
-  }
+  //  // fall through to standard processing to check the DQ node for the sake of completeness
+  //}
 
   std::vector<size_t> input_indices = info->transposible_inputs_fn(ctx, node);
   if (!ShouldProcessTranspose(ctx, node, perm, transpose_input_index, outputs_leading_to_transpose,
@@ -2722,13 +2724,24 @@ OptimizeResult OptimizeImpl(OptimizerCtx& ctx) {
           continue;
         }
 
-        auto& qdq_node_unit_target_node = *consumers->nodes[0];
-        if (!OutputValueHasSingleConsumerNode(ctx.graph, qdq_node_unit_target_node, 0, single_consumer_node) ||
-            !single_consumer_node ||
-            single_consumer_node->OpType() != "QuantizeLinear") {
-          // not a broken QDQ node unit
+        if (consumers->nodes[0]->OpType() == "QuantizeLinear") {
+          // already in QDQ node unit
           continue;
         }
+
+        // 2 cases:
+        // Broken QDQ node unit where Transpose is inside
+        //   DQ -> Transpose -> Op -> Q
+        // Or a Transpose has pushed past a DQ. If there's a single consumer we can make a QDQ ndoe unit
+        // for the Transpose. Given this, checking Op and Q isn't necessary.
+        //
+        // auto& qdq_node_unit_target_node = *consumers->nodes[0];
+        // if (!OutputValueHasSingleConsumerNode(ctx.graph, qdq_node_unit_target_node, 0, single_consumer_node) ||
+        //    !single_consumer_node ||
+        //    single_consumer_node->OpType() != "QuantizeLinear") {
+        //  // not a broken QDQ node unit
+        //  continue;
+        //}
       }
 
       // Add Q -> DQ after the DQ -> Transpose

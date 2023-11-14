@@ -706,10 +706,6 @@ static std::optional<int> GetLayoutTransformationPotentiallyAddedOpSinceVersion(
 // Based on the opset version imported for this model, returns the since version for the node.
 static int GetSinceVersionForNewOp(std::string_view op_type, std::string_view domain,
                                    const std::unordered_map<std::string, int>& domain_to_version_map) {
-  // TODO do we need this check? we will also check kLayoutTransformationPotentiallyAddedOps
-  ORT_ENFORCE(domain == kOnnxDomain, "Transpose optimizer is expected to add only onnx domain ops. Domain: ",
-              domain, " provided for op: ", op_type);
-
   const auto opset_import_iter = domain_to_version_map.find(std::string(domain));
   ORT_ENFORCE(opset_import_iter != domain_to_version_map.end(), domain, " domain not found in opset imports.");
 
