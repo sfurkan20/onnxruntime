@@ -4549,7 +4549,6 @@ static void CheckSharedInitializerHandling(bool broadcast) {
   std::vector<OrtValue> fetches;
 
   SessionOptions so;
-  // ASSERT_STATUS_OK(so.config_options.AddConfigEntry(kDebugLayoutTransformation, "1"));
   ASSERT_STATUS_OK(so.config_options.AddConfigEntry(kOrtSessionOptionsDisableQuantQDQ, "1"));
 
   // get results with no modifications to the model
@@ -4581,6 +4580,10 @@ static void CheckSharedInitializerHandling(bool broadcast) {
     ASSERT_EQ(result.error_msg, std::nullopt);
     ASSERT_TRUE(result.graph_modified);
     ASSERT_TRUE(graph.GraphResolveNeeded());
+
+    // Use this to save if needed
+    // auto& m = session.GetModel();
+    // ASSERT_STATUS_OK(Model::Save(const_cast<Model&>(m), "updated_model.onnx"));
 
     std::map<std::string, int> op_to_count = CountOpsInGraph(graph);
     EXPECT_EQ(op_to_count["Transpose"], 0) << "The Transpose nodes should have been pushed through or canceled out.";
@@ -4614,6 +4617,8 @@ TEST(TransposeOptimizerTests, SharedInitializerHandlingBroadcast) {
   CheckSharedInitializerHandling(/*broadcast*/ true);
 }
 
+// Unit test where EstimateTransposeValueCost must look past a DQ -> Squeeze to see the Transponse of a shared
+// initializer for the overall cost of pushing the Transpose throught the second Where to be negative.
 TEST(TransposeOptimizerTests, SharedInitializerHandlingBroadcast2) {
   auto model_uri = ORT_TSTR("testdata/transpose_optimizer_shared_initializers_broadcast2.onnx");
 
@@ -4681,15 +4686,19 @@ TEST(TransposeOptimizerTests, SharedInitializerHandlingBroadcast2) {
     ASSERT_TRUE(graph.GraphResolveNeeded());
     ASSERT_STATUS_OK(graph.Resolve());
 
-    auto& m = session.GetModel();
-    ASSERT_STATUS_OK(Model::Save(const_cast<Model&>(m),
-                                 "transpose_optimizer_shared_initializers_broadcast2.updated.onnx"));
+    // Use this to save if needed
+    // ASSERT_STATUS_OK(Model::Save(const_cast<Model&>(session.GetModel()), updated_model.onnx"));
 
-    // Pushing the Transpose through the 2 Where nodes results in 2 inputs being transposed
-    // (cond_in_0 and y_quant via DQ) and the 3rd input in each ca
+    // Pushing the initial Transpose through the 2 Where nodes results in
+    // - x_in_0 needs Transpose and Unsqueeze to broadcast correctly into the first Where
+    // - y_quant is updated in-place to transposed layout and used in both Where nodes
+    // - x_in_1 needs Transpose and Unsqueeze to broadcast correctly into the second Where
+    // - cond_in_1 needs Transpose
+    //   - as we're pushing a Transpose through the Add for one input, and undo-ing the Transpose on y_quant for
+    //     the other input, we save 2 by adding 1 to cond_in_1
     std::map<std::string, int> op_to_count = CountOpsInGraph(graph);
     EXPECT_EQ(op_to_count["Transpose"], 3) << "The 2 X inputs and cond_in_1 should require transpose.";
-    EXPECT_EQ(op_to_count["Unsqueeze"], 2) << "The 2 X inputs shoudl require Unsqueeze.";
+    EXPECT_EQ(op_to_count["Unsqueeze"], 2) << "The 2 X inputs should require Unsqueeze.";
 
     ASSERT_STATUS_OK(session.Initialize());
     ASSERT_STATUS_OK(session.Run(feeds, output_names, &fetches));
