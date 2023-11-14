@@ -4549,6 +4549,104 @@ static void CheckSharedInitializerHandling(bool broadcast) {
   std::vector<OrtValue> fetches;
 
   SessionOptions so;
+  // ASSERT_STATUS_OK(so.config_options.AddConfigEntry(kDebugLayoutTransformation, "1"));
+  ASSERT_STATUS_OK(so.config_options.AddConfigEntry(kOrtSessionOptionsDisableQuantQDQ, "1"));
+
+  // get results with no modifications to the model
+  {
+    so.graph_optimization_level = TransformerLevel::Default;  // off
+    InferenceSessionWrapper session{so, GetEnvironment()};
+    ASSERT_STATUS_OK(session.Load(model_uri));
+    ASSERT_STATUS_OK(session.Initialize());
+    ASSERT_STATUS_OK(session.Run(feeds, output_names, &fetches_orig));
+  }
+
+  {
+    InferenceSessionWrapper session{so, GetEnvironment()};
+    ASSERT_STATUS_OK(session.Load(model_uri));
+
+    // we call the ONNX transpose optimizer directly to simplify the model required to exercise the shared initializer
+    // handling. this means we don't need to disable optimizers that might alter the graph before the
+    // transpose optimizer runs (at a minimum ConstantFolding, CommonSubexpressionElimination and ConstantSharing).
+    Graph& graph = session.GetMutableGraph();
+    CPUAllocator allocator;
+
+    using namespace onnx_transpose_optimization;
+    auto api_graph = MakeApiGraph(graph, TestCPUExecutionProvider()->CreatePreferredAllocators()[0],
+                                  /*new_node_ep*/ nullptr);
+
+    // default optimization cost check
+    OptimizeResult result = Optimize(*api_graph);
+
+    ASSERT_EQ(result.error_msg, std::nullopt);
+    ASSERT_TRUE(result.graph_modified);
+    ASSERT_TRUE(graph.GraphResolveNeeded());
+
+    std::map<std::string, int> op_to_count = CountOpsInGraph(graph);
+    EXPECT_EQ(op_to_count["Transpose"], 0) << "The Transpose nodes should have been pushed through or canceled out.";
+    if (broadcast) {
+      EXPECT_EQ(op_to_count["Unsqueeze"], 0) << "Any Unsqueeze nodes should have been canceled out.";
+    }
+
+    ASSERT_STATUS_OK(graph.Resolve());
+    ASSERT_STATUS_OK(session.Initialize());
+    ASSERT_STATUS_OK(session.Run(feeds, output_names, &fetches));
+  }
+
+  ASSERT_THAT(fetches_orig[0].Get<Tensor>().DataAsSpan<float>(),
+              testing::ContainerEq(fetches[0].Get<Tensor>().DataAsSpan<float>()));
+}
+
+// test we re-use a modified shared initializer wherever possible. model has one initializer that is used by 3 DQ nodes
+// and one initializer that is used by 2 Add nodes. both cases should be handled with the initializer being
+// modified in-place for the first usage, and the Transpose added to the second usage being cancelled out when the
+// original Transpose at the start of the model is pushed down.
+TEST(TransposeOptimizerTests, SharedInitializerHandling) {
+  CheckSharedInitializerHandling(/*broadcast*/ false);
+}
+
+// same setup as the above test, however the initializer is broadcast to bring UnsqueezeInput into play.
+// the in-place modification of the initializer for the first usage results in
+//   <initializer> -> Transpose -> Squeeze -> {DQ | Add}
+// the later usages of the initializer should attempt to cancel out the Squeeze in UnsqueezeInput,
+// followed by canceling out the Transpose in TransposeInput.
+TEST(TransposeOptimizerTests, SharedInitializerHandlingBroadcast) {
+  CheckSharedInitializerHandling(/*broadcast*/ true);
+}
+
+TEST(TransposeOptimizerTests, SharedInitializerHandlingBroadcast2) {
+  auto model_uri = ORT_TSTR("testdata/transpose_optimizer_shared_initializers_broadcast2.onnx");
+
+  RandomValueGenerator random{123};
+  std::vector<int64_t> cond_input_0_dims{3, 2};
+  std::vector<int64_t> cond_input_1_dims{2, 3};
+  std::vector<bool> cond_input_data = {true, false, false, true, true, false};
+
+  std::vector<int64_t> x_0_input_dims{3};
+  std::vector<int64_t> x_1_input_dims{3};
+  std::vector<float> x_input_data_0 = random.Gaussian<float>(x_0_input_dims, 0.0f, 1.0f);
+  std::vector<float> x_input_data_1 = random.Gaussian<float>(x_1_input_dims, 0.0f, 1.0f);
+
+  OrtValue cond_input_0, cond_input_1, x_input_0, x_input_1;
+  CreateMLValue<bool>(TestCPUExecutionProvider()->CreatePreferredAllocators()[0], cond_input_0_dims, cond_input_data,
+                      &cond_input_0);
+  CreateMLValue<bool>(TestCPUExecutionProvider()->CreatePreferredAllocators()[0], cond_input_1_dims, cond_input_data,
+                      &cond_input_1);
+  CreateMLValue<float>(TestCPUExecutionProvider()->CreatePreferredAllocators()[0], x_0_input_dims, x_input_data_0,
+                       &x_input_0);
+  CreateMLValue<float>(TestCPUExecutionProvider()->CreatePreferredAllocators()[0], x_1_input_dims, x_input_data_1,
+                       &x_input_1);
+
+  NameMLValMap feeds{{"cond_in_0", cond_input_0},
+                     {"cond_in_1", cond_input_1},
+                     {"x_in_0", x_input_0},
+                     {"x_in_1", x_input_1}};
+
+  std::vector<std::string> output_names{"output0"};
+  std::vector<OrtValue> fetches_orig;
+  std::vector<OrtValue> fetches;
+
+  SessionOptions so;
   ASSERT_STATUS_OK(so.config_options.AddConfigEntry(kDebugLayoutTransformation, "1"));
   ASSERT_STATUS_OK(so.config_options.AddConfigEntry(kOrtSessionOptionsDisableQuantQDQ, "1"));
 
@@ -4583,11 +4681,15 @@ static void CheckSharedInitializerHandling(bool broadcast) {
     ASSERT_TRUE(graph.GraphResolveNeeded());
     ASSERT_STATUS_OK(graph.Resolve());
 
+    auto& m = session.GetModel();
+    ASSERT_STATUS_OK(Model::Save(const_cast<Model&>(m),
+                                 "transpose_optimizer_shared_initializers_broadcast2.updated.onnx"));
+
+    // Pushing the Transpose through the 2 Where nodes results in 2 inputs being transposed
+    // (cond_in_0 and y_quant via DQ) and the 3rd input in each ca
     std::map<std::string, int> op_to_count = CountOpsInGraph(graph);
-    EXPECT_EQ(op_to_count["Transpose"], 0) << "The Transpose nodes should have been pushed through or canceled out.";
-    if (broadcast) {
-      EXPECT_EQ(op_to_count["Unsqueeze"], 0) << "Any Unsqueeze nodes should have been canceled out.";
-    }
+    EXPECT_EQ(op_to_count["Transpose"], 3) << "The 2 X inputs and cond_in_1 should require transpose.";
+    EXPECT_EQ(op_to_count["Unsqueeze"], 2) << "The 2 X inputs shoudl require Unsqueeze.";
 
     ASSERT_STATUS_OK(session.Initialize());
     ASSERT_STATUS_OK(session.Run(feeds, output_names, &fetches));
@@ -4595,23 +4697,6 @@ static void CheckSharedInitializerHandling(bool broadcast) {
 
   ASSERT_THAT(fetches_orig[0].Get<Tensor>().DataAsSpan<float>(),
               testing::ContainerEq(fetches[0].Get<Tensor>().DataAsSpan<float>()));
-}
-
-// test we re-use a modified shared initializer wherever possible. model has one initializer that is used by 3 DQ nodes
-// and one initializer that is used by 2 Add nodes. both cases should be handled with the initializer being
-// modified in-place for the first usage, and the Transpose added to the second usage being cancelled out when the
-// original Transpose at the start of the model is pushed down.
-TEST(TransposeOptimizerTests, SharedInitializerHandling) {
-  CheckSharedInitializerHandling(/*broadcast*/ false);
-}
-
-// same setup as the above test, however the initializer is broadcast to bring UnsqueezeInput into play.
-// the in-place modification of the initializer for the first usage results in
-//   <initializer> -> Transpose -> Squeeze -> {DQ | Add}
-// the later usages of the initializer should attempt to cancel out the Squeeze in UnsqueezeInput,
-// followed by canceling out the Transpose in TransposeInput.
-TEST(TransposeOptimizerTests, SharedInitializerHandlingBroadcast) {
-  CheckSharedInitializerHandling(/*broadcast*/ true);
 }
 
 // model where layout transform results in transposing a non-const input that is broadcast.

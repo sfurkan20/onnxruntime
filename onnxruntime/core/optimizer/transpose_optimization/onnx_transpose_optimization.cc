@@ -107,10 +107,6 @@ static std::unique_ptr<api::NodeRef> MakeQOrDQ(api::GraphRef& graph, std::string
                                                std::vector<std::string_view> inputs,  // data, scale{, zp}
                                                std::optional<int64_t> axis) {
   std::unique_ptr<api::NodeRef> node = graph.AddNode(op_type, inputs, /* num_outputs */ 1, domain);
-  if (!domain.empty()) {
-    assert(node->SinceVersion() == 1);
-  }
-
   // only set if provided and not the default
   if (axis && axis != 1) {
     node->SetAttributeInt("axis", *axis);
@@ -153,10 +149,10 @@ static inline bool NormalizeAndValidateAxis(int64_t& axis, size_t rank) {
 }
 
 /// <summary>
-/// Check if an output value has a single consumer node.
+/// Check if an output value has a single consumer that is a node.
 /// </summary>
-/// <param name="single_consumer">Consumer node if the single consumer is a node.</param>
-/// <returns>True if there is a single consumer.</returns>
+/// <param name="single_consumer">Consumer node if found.</param>
+/// <returns>True if there is a single consumer node.</returns>
 static bool OutputValueHasSingleConsumerNode(const api::GraphRef& graph, const api::NodeRef& node, size_t output_idx,
                                              std::unique_ptr<api::NodeRef>& single_consumer) {
   auto value = node.Outputs()[output_idx];
@@ -175,8 +171,8 @@ static bool OutputValueHasSingleConsumerNode(const api::GraphRef& graph, const a
 static std::unique_ptr<api::NodeRef> GetDQIfProducingValue(const api::GraphRef& graph, std::string_view value_name) {
   auto maybe_dq_node = graph.GetNodeProducingOutput(value_name);
 
-  return (maybe_dq_node && maybe_dq_node->OpType() == "DequantizeLinear") ? std::move(maybe_dq_node)
-                                                                          : std::unique_ptr<api::NodeRef>();
+  return (maybe_dq_node != nullptr && maybe_dq_node->OpType() == "DequantizeLinear") ? std::move(maybe_dq_node)
+                                                                                     : std::unique_ptr<api::NodeRef>();
 }
 
 /// <summary>
@@ -201,9 +197,8 @@ static std::unique_ptr<api::NodeRef> GetDQWithConstInitializerInputAndSingleCons
         break;
       }
 
-      // For now keep it simple and don't support per-axis quantization as that would require updating the
-      // scale and zero point values in the DQ node to re-order if transposing, or reshape if unsqueezing.
-      // the rank of the `scale` and `zero point` inputs must match so we only need to check `scale`.
+      // For now keep it simple and don't support per-axis quantization as that would require updating the axis of
+      // the DQ node during TransposeInputImpl and UnsqueezeInput.
       auto dq_scale = graph.GetConstant(dq_node->Inputs()[1]);
       if (!dq_scale || dq_scale->NumElements() != 1) {
         break;
@@ -1107,7 +1102,7 @@ static bool CanLikelyRemoveTranspose(const api::GraphRef& graph, api::NodeRef& t
 // return true if
 //   - the value is a constant initializer
 //   - the value is the output of a DQ node who's input is a constant initializer
-//     - UnsqueezeInput/TranposeInput can look past the DQ to update the constant initializer directly
+//     - UnsqueezeInput/TransposeInput can look past the DQ to update the constant initializer directly
 //     - DQ node is currently ignored if it uses per-channel quantization
 //       - supporting per-channel quantization requires modifying the scales and zero point data, which can be done
 //         if/when there's a use-case to justify the development cost.
@@ -1150,17 +1145,50 @@ static int EstimateTransposeValueCost(const api::GraphRef& graph, std::string_vi
   // Case 2: Transposing a transpose either cancels it or composes the permutations.
   std::unique_ptr<api::NodeRef> producer_node = graph.GetNodeProducingOutput(input);
 
-  if (producer_node != nullptr && producer_node->IsOp("Transpose")) {
-    std::optional<std::vector<int64_t>> perm2 = GetPermAttrIfValid(*producer_node);
-    if (perm2 != std::nullopt) {
-      if (*perm2 == perm_inv && CanLikelyRemoveTranspose(graph, *producer_node, extended_handlers)) {
-        return -EstimateValueRank(graph, input);
-      } else {
-        return 0;
+  if (producer_node != nullptr) {
+    // look past a DQ as we do that in the TransposeInput handling.
+    // match onnx and contrib ops domain for Q/DQ while we have those ops in both domains.
+    //
+    // this primarily handles cancelling out a Transpose or Squeeze added to a shared initializer that was updated
+    // by TransposeInputImpl Case 1 or UnqueezeInput Case 1.
+    // if a shared initializer is not broadcast, we have <updated initializer> -> Transpose -> DQ
+    // if a shared initializer is broadcast, we have <updated initializer> -> Transpose -> Squeeze -> DQ so we need
+    // to look slightly further in the hopes of finding the Transpose.
+    // in theory.
+    // in practice it would only be necessary if the operator that we're looking to push the transpose through has
+    // more than 2 inputs, and currently there are no operators with 3 or more inputs, a broadcastable input, that the
+    // transpose optimizer can handle.
+    if (producer_node->OpType() == "DequantizeLinear") {
+      auto dq_input_node = graph.GetNodeProducingOutput(producer_node->Inputs()[0]);
+      if (dq_input_node != nullptr) {
+        // TODO: Add unit test with a shared initializer that is broadcast and feeds into a node with 3 inputs
+        // to validate. If there are only 2 inputs the negative cost of the input being transposed will always beat
+        // the broadcast initializer. If there are 3 inputs we need the shared initializer to have a negative cost.
+        if (dq_input_node->OpType() == "Squeeze") {
+          auto squeeze_input_node = graph.GetNodeProducingOutput(dq_input_node->Inputs()[0]);
+          if (squeeze_input_node->OpType() == "Transpose") {
+            // we only want to set this if it is a Transpose as otherwise we're invalidating the cost given it is
+            // rank based and the Squeeze will change that.
+            producer_node = std::move(squeeze_input_node);
+          }
+        } else {
+          // DQ doesn't change the rank so we don't need to check the OpType of the DQ input
+          producer_node = std::move(dq_input_node);
+        }
+      }
+    }
+
+    if (producer_node->IsOp("Transpose")) {
+      std::optional<std::vector<int64_t>> perm2 = GetPermAttrIfValid(*producer_node);
+      if (perm2 != std::nullopt) {
+        if (*perm2 == perm_inv && CanLikelyRemoveTranspose(graph, *producer_node, extended_handlers)) {
+          return -EstimateValueRank(graph, input);
+        } else {
+          return 0;
+        }
       }
     }
   }
-
   // Case 3: We will likely need to add a transpose.
   return EstimateValueRank(graph, input);
 }
