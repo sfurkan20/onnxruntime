@@ -225,7 +225,7 @@ static std::unique_ptr<api::NodeRef> GetDQWithConstInitializerInputAndSingleCons
 /// <summary>
 /// Insert a Q -> DQ pair after the node following the DQ by using scale and zp info from the preceding DQ node.
 /// DQ -> next node => DQ -> next node -> Q -> DQ.
-/// This is only called for Transpose, Unsqueeze and Gather nodes.
+/// This is only called for Transpose and Unsqueeze nodes.
 /// </summary>
 /// <param name="dq_node">DQ node.</param>
 /// <param name="next_node">Node following DQ node.</param>
@@ -239,7 +239,7 @@ static bool MakeQDQNodeUnit(api::GraphRef& graph, const api::NodeRef& dq_node) {
   }
 
   auto& next_node = *single_consumer_node;
-  assert(next_node.OpType() == "Transpose" || next_node.OpType() == "Unsqueeze" || next_node.OpType() == "Gather");
+  assert(next_node.OpType() == "Transpose" || next_node.OpType() == "Unsqueeze");
 
   const auto dq_domain = dq_node.Domain();
   const auto& dq_inputs = dq_node.Inputs();
@@ -1415,8 +1415,8 @@ static void PermuteInput(api::GraphRef& graph, api::NodeRef& node, size_t i, con
     }
   }
 
-  auto dq_input_node = GetDQIfProducingValue(graph, input_name);
-
+  // we don't check for a DQ input here as PermuteInput is only used for Resize (roi/scales/sizes) and Pad (pads)
+  // inputs that would never be quantized.
   std::string_view gather_indices_const = AddInitializerInt64(graph, /*shape*/ {rank_int}, perm);
   std::vector<std::string_view> gather_inputs{input_name, gather_indices_const};
   auto gather_ptr = graph.AddNode("Gather", gather_inputs, /*num_outputs*/ 1);
@@ -1425,10 +1425,6 @@ static void PermuteInput(api::GraphRef& graph, api::NodeRef& node, size_t i, con
   graph.CopyValueInfo(input_name, gather_output);
   gather.SetAttributeInt("axis", 0);
   node.SetInput(i, gather_output);
-
-  if (dq_input_node) {
-    MakeQDQNodeUnit(graph, *dq_input_node);
-  }
 }
 
 bool HandleResize([[maybe_unused]] HandlerArgs& args) {
@@ -2527,7 +2523,7 @@ OptimizeResult OptimizeImpl(OptimizerCtx& ctx) {
 
     for (size_t i_idx = 0, i_end = node.Inputs().size(); i_idx < i_end; ++i_idx) {
       // any change requires a DQ as the input to the current node
-      auto input_node = ctx.graph.GetNodeProducingOutput(node.Inputs()[i_idx]));
+      auto input_node = ctx.graph.GetNodeProducingOutput(node.Inputs()[i_idx]);
       if (!input_node || input_node->OpType() != "DequantizeLinear") {
         continue;
       }
@@ -2537,6 +2533,10 @@ OptimizeResult OptimizeImpl(OptimizerCtx& ctx) {
 
       // remove empty DQ -> Q before a consumer node if the DQ and Q have matching types, scale and zp.
       if (node.OpType() == "QuantizeLinear") {
+        // we don't need to check scale and zp inputs, and we may remove nodes invalidating `node` if we
+        // continue with the loop of inputs so set i_end to bail
+        i_end = 1;
+
         auto& q_node = node;
         if (OutputValueHasSingleConsumerNode(ctx.graph, dq_node, 0, single_consumer_node) &&
             OutputValueHasSingleConsumerNode(ctx.graph, q_node, 0, single_consumer_node) &&
