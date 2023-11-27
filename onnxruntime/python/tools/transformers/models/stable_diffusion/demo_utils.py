@@ -42,7 +42,7 @@ def arg_parser(description: str):
     return argparse.ArgumentParser(description=description, formatter_class=RawTextArgumentDefaultsHelpFormatter)
 
 
-def parse_arguments(is_xl: bool, parser, disable_refiner=False):
+def parse_arguments(is_xl: bool, parser):
     engines = ["ORT_CUDA", "ORT_TRT", "TRT"]
 
     parser.add_argument(
@@ -126,7 +126,6 @@ def parse_arguments(is_xl: bool, parser, disable_refiner=False):
             help="Use fine-tuned latent consistency model to replace the UNet in base.",
         )
 
-    if is_xl and not disable_refiner:
         parser.add_argument(
             "--refiner-scheduler",
             type=str,
@@ -246,8 +245,7 @@ def parse_arguments(is_xl: bool, parser, disable_refiner=False):
             print("[I] Use --scheduler=LCM for base since LCM is used.")
             args.scheduler = "LCM"
 
-        if not disable_refiner:
-            assert args.strength > 0.0 and args.strength < 1.0
+        assert args.strength > 0.0 and args.strength < 1.0
 
         assert not (args.lcm and args.lora_weights), "it is not supported to use both lcm unet and Lora together"
 
@@ -285,7 +283,7 @@ def get_metadata(args, is_xl: bool = False) -> Dict[str, Any]:
         "engine": args.engine,
     }
 
-    if is_xl and hasattr(args, "disable_refiner") and not args.disable_refiner:
+    if is_xl and not args.disable_refiner:
         metadata["base.scheduler"] = args.scheduler
         metadata["base.denoising_steps"] = args.denoising_steps
         metadata["base.guidance"] = args.guidance
