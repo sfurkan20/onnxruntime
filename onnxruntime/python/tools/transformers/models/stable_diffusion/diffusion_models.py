@@ -39,19 +39,6 @@ from onnxruntime.transformers.onnx_model import OnnxModel
 
 logger = logging.getLogger(__name__)
 
-# TODO: move these to Torch engine builder
-# # FIXME after serialization support for torch.compile is added
-# def get_checkpoint_dir(framework_model_dir, version, pipeline, subfolder, torch_inference):
-#     return os.path.join(framework_model_dir, version, pipeline, subfolder)
-
-# torch_inference_modes = ['default', 'reduce-overhead', 'max-autotune']
-# # FIXME update callsites after serialization support for torch.compile is added
-# def optimize_checkpoint(model, torch_inference):
-#     if not torch_inference or torch_inference == 'eager':
-#         return model
-#     assert torch_inference in torch_inference_modes
-#     return torch.compile(model, mode=torch_inference, dynamic=False, fullgraph=False)
-
 
 class TrtOptimizer:
     def __init__(self, onnx_graph):
@@ -258,17 +245,17 @@ class PipelineInfo:
                 "canny": "lllyasviel/control_v11p_sd15_canny",
                 "depth": "lllyasviel/control_v11f1p_sd15_depth",
                 "openpose": "lllyasviel/control_v11p_sd15_openpose",
-                "tile": "lllyasviel/control_v11f1e_sd15_tile",
-                "lineart": "lllyasviel/control_v11p_sd15_lineart",
-                "inpaint": "lllyasviel/control_v11p_sd15_inpaint",
-                "softedge": "lllyasviel/control_v11p_sd15_softedge",
+                # "tile": "lllyasviel/control_v11f1e_sd15_tile",
+                # "lineart": "lllyasviel/control_v11p_sd15_lineart",
+                # "inpaint": "lllyasviel/control_v11p_sd15_inpaint",
+                # "softedge": "lllyasviel/control_v11p_sd15_softedge",
                 "mlsd": "lllyasviel/control_v11p_sd15_mlsd",
                 "scribble": "lllyasviel/control_v11p_sd15_scribble",
-                "ip2p": "lllyasviel/control_v11e_sd15_ip2p",
-                "normal": "lllyasviel/control_v11p_sd15_normalbae",
+                # "ip2p": "lllyasviel/control_v11e_sd15_ip2p",
+                "normalbae": "lllyasviel/control_v11p_sd15_normalbae",
                 "seg": "lllyasviel/control_v11p_sd15_seg",
-                "shuffle": "lllyasviel/control_v11e_sd15_shuffle",
-                "lineart_anime": "lllyasviel/control_v11p_sd15s2_lineart_anime",
+                # "shuffle": "lllyasviel/control_v11e_sd15_shuffle",
+                # "lineart_anime": "lllyasviel/control_v11p_sd15s2_lineart_anime",
             }
         return None
 

@@ -22,7 +22,16 @@
 
 import coloredlogs
 from cuda import cudart
-from demo_utils import arg_parser, get_metadata, init_pipeline, max_batch, parse_arguments, repeat_prompt
+from demo_utils import (
+    add_controlnet_arguments,
+    arg_parser,
+    get_metadata,
+    init_pipeline,
+    max_batch,
+    parse_arguments,
+    process_controlnet_arguments,
+    repeat_prompt,
+)
 from diffusion_models import PipelineInfo
 from engine_builder import EngineType, get_engine_type
 from pipeline_txt2img import Txt2ImgPipeline
@@ -31,7 +40,11 @@ if __name__ == "__main__":
     coloredlogs.install(fmt="%(funcName)20s: %(message)s")
 
     parser = arg_parser("Options for Stable Diffusion Demo")
+    add_controlnet_arguments(parser)
     args = parse_arguments(is_xl=False, parser=parser)
+
+    controlnet_images, controlnet_scale = process_controlnet_arguments(args)
+
     prompt, negative_prompt = repeat_prompt(args)
 
     image_height = args.height
@@ -62,7 +75,7 @@ if __name__ == "__main__":
         min_image_size=min_image_size,
         max_image_size=max_image_size,
         do_classifier_free_guidance=(args.guidance > 1.0),
-        controlnet=None,
+        controlnet=args.controlnet_type,
         lora_weights=args.lora_weights,
         lora_scale=args.lora_scale,
     )
@@ -106,6 +119,8 @@ if __name__ == "__main__":
             denoising_steps=args.denoising_steps,
             guidance=args.guidance,
             seed=args.seed,
+            controlnet_images=controlnet_images,
+            controlnet_scales=controlnet_scale,
             return_type="image",
         )
 

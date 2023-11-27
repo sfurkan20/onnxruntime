@@ -23,8 +23,10 @@
 import argparse
 import os
 from io import BytesIO
-from typing import Any, Dict
+from typing import Any, Dict, List
 
+import cv2
+import numpy as np
 import requests
 import torch
 from diffusion_models import PipelineInfo
@@ -390,6 +392,239 @@ def init_pipeline(
     return pipeline
 
 
-def download_image(url):
+def get_depth_image(image):
+    """
+    Create depth map for SDXL depth control net.
+    """
+    import numpy as np
+    import torch
+    from PIL import Image
+    from transformers import DPTFeatureExtractor, DPTForDepthEstimation
+
+    depth_estimator = DPTForDepthEstimation.from_pretrained("Intel/dpt-hybrid-midas").to("cuda")
+    feature_extractor = DPTFeatureExtractor.from_pretrained("Intel/dpt-hybrid-midas")
+
+    image = feature_extractor(images=image, return_tensors="pt").pixel_values.to("cuda")
+    with torch.no_grad(), torch.autocast("cuda"):
+        depth_map = depth_estimator(image).predicted_depth
+
+    depth_map = torch.nn.functional.interpolate(
+        depth_map.unsqueeze(1),
+        size=(1024, 1024),
+        mode="bicubic",
+        align_corners=False,
+    )
+    depth_min = torch.amin(depth_map, dim=[1, 2, 3], keepdim=True)
+    depth_max = torch.amax(depth_map, dim=[1, 2, 3], keepdim=True)
+    depth_map = (depth_map - depth_min) / (depth_max - depth_min)
+    image = torch.cat([depth_map] * 3, dim=1)
+
+    image = image.permute(0, 2, 3, 1).cpu().numpy()[0]
+    image = Image.fromarray((image * 255.0).clip(0, 255).astype(np.uint8))
+    return image
+
+
+def get_canny_image(image) -> Image.Image:
+    image = np.array(image)
+    image = cv2.Canny(image, 100, 200)
+    image = image[:, :, None]
+    image = np.concatenate([image, image, image], axis=2)
+    image = Image.fromarray(image)
+
+
+def controlnet_demo_images_xl(args) -> List[Image.Image]:
+    from diffusers.utils import load_image
+
+    image = None
+    if args.controlnet_image:
+        image = Image.open(args.controlnet_image[0])
+    else:
+        # If no image is provided, download an image for demo purpose.
+        if args.controlnet_type[0] == "canny":
+            image = load_image(
+                "https://hf.co/datasets/huggingface/documentation-images/resolve/main/diffusers/input_image_vermeer.png"
+            )
+        elif args.controlnet_type[0] == "depth":
+            image = load_image(
+                "https://huggingface.co/lllyasviel/sd-controlnet-depth/resolve/main/images/stormtrooper.png"
+            )
+
+    controlnet_images = []
+    if args.controlnet_type[0] == "canny":
+        controlnet_images.append(get_canny_image(image))
+    elif args.controlnet_type[0] == "depth":
+        controlnet_images.append(get_depth_image(image))
+    else:
+        raise ValueError(f"The controlnet is not supported for SDXL: {args.controlnet_type}")
+
+    return controlnet_images
+
+
+# --------------------------------------------
+# The following are for Control Net for SD 1.5
+# --------------------------------------------
+def add_controlnet_arguments(parser, is_xl: bool = False):
+    group = parser.add_argument_group("Options for ControlNet (only supports SD 1.5 or XL).")
+
+    group.add_argument(
+        "--controlnet-image",
+        nargs="*",
+        type=str,
+        default=[],
+        help="Path to the input regular RGB image/images for controlnet",
+    )
+    group.add_argument(
+        "--controlnet-type",
+        nargs="*",
+        type=str,
+        default=[],
+        choices=list(PipelineInfo.supported_controlnet("xl-1.0" if is_xl else "1.5").keys()),
+        help="A list of controlnet type",
+    )
+    group.add_argument(
+        "--controlnet-scale",
+        nargs="*",
+        type=float,
+        default=[],
+        help="The outputs of the controlnet are multiplied by `controlnet_scale` before they are added to the residual in the original unet. Default is 0.35 for SDXL, or 1.0 for SD 1.5",
+    )
+
+
+def download_image(url) -> Image.Image:
     response = requests.get(url)
     return Image.open(BytesIO(response.content)).convert("RGB")
+
+
+def controlnet_demo_images(controlnet_list: List[str], height, width) -> List[Image.Image]:
+    import controlnet_aux
+
+    control_images = []
+    shape = (height, width)
+    for controlnet in controlnet_list:
+        if controlnet == "canny":
+            canny_image = download_image(
+                "https://hf.co/datasets/huggingface/documentation-images/resolve/main/diffusers/input_image_vermeer.png"
+            )
+            canny_image = controlnet_aux.CannyDetector()(canny_image)
+            control_images.append(canny_image.resize(shape))
+        elif controlnet == "normalbae":
+            normal_image = download_image(
+                "https://huggingface.co/lllyasviel/sd-controlnet-normal/resolve/main/images/toy.png"
+            )
+            normal_image = controlnet_aux.NormalBaeDetector.from_pretrained("lllyasviel/Annotators")(normal_image)
+            control_images.append(normal_image.resize(shape))
+        elif controlnet == "depth":
+            depth_image = download_image(
+                "https://huggingface.co/lllyasviel/sd-controlnet-depth/resolve/main/images/stormtrooper.png"
+            )
+            depth_image = controlnet_aux.LeresDetector.from_pretrained("lllyasviel/Annotators")(depth_image)
+            control_images.append(depth_image.resize(shape))
+        elif controlnet == "mlsd":
+            mlsd_image = download_image(
+                "https://huggingface.co/lllyasviel/sd-controlnet-mlsd/resolve/main/images/room.png"
+            )
+            mlsd_image = controlnet_aux.MLSDdetector.from_pretrained("lllyasviel/Annotators")(mlsd_image)
+            control_images.append(mlsd_image.resize(shape))
+        elif controlnet == "openpose":
+            openpose_image = download_image(
+                "https://huggingface.co/lllyasviel/sd-controlnet-openpose/resolve/main/images/pose.png"
+            )
+            openpose_image = controlnet_aux.OpenposeDetector.from_pretrained("lllyasviel/Annotators")(openpose_image)
+            control_images.append(openpose_image.resize(shape))
+        elif controlnet == "scribble":
+            scribble_image = download_image(
+                "https://huggingface.co/lllyasviel/sd-controlnet-scribble/resolve/main/images/bag.png"
+            )
+            scribble_image = controlnet_aux.HEDdetector.from_pretrained("lllyasviel/Annotators")(
+                scribble_image, scribble=True
+            )
+            control_images.append(scribble_image.resize(shape))
+        elif controlnet == "seg":
+            seg_image = download_image(
+                "https://huggingface.co/lllyasviel/sd-controlnet-seg/resolve/main/images/house.png"
+            )
+            seg_image = controlnet_aux.SamDetector.from_pretrained(
+                "ybelkada/segment-anything", subfolder="checkpoints"
+            )(seg_image)
+            control_images.append(seg_image.resize(shape))
+        else:
+            raise ValueError(f"There is no demo image of this controlnet: {controlnet}")
+    return control_images
+
+
+def process_controlnet_image(controlnet_type: str, image: Image.Image, height, width):
+    import controlnet_aux
+
+    control_image = None
+    shape = (height, width)
+    image = image.convert("RGB")
+    if controlnet_type == "canny":
+        canny_image = controlnet_aux.CannyDetector()(image)
+        control_image = canny_image.resize(shape)
+    elif controlnet_type == "normalbae":
+        normal_image = controlnet_aux.NormalBaeDetector.from_pretrained("lllyasviel/Annotators")(image)
+        control_image = normal_image.resize(shape)
+    elif controlnet_type == "depth":
+        depth_image = controlnet_aux.LeresDetector.from_pretrained("lllyasviel/Annotators")(image)
+        control_image = depth_image.resize(shape)
+    elif controlnet_type == "mlsd":
+        mlsd_image = controlnet_aux.MLSDdetector.from_pretrained("lllyasviel/Annotators")(image)
+        control_image = mlsd_image.resize(shape)
+    elif controlnet_type == "openpose":
+        openpose_image = controlnet_aux.OpenposeDetector.from_pretrained("lllyasviel/Annotators")(image)
+        control_image = openpose_image.resize(shape)
+    elif controlnet_type == "scribble":
+        scribble_image = controlnet_aux.HEDdetector.from_pretrained("lllyasviel/Annotators")(image, scribble=True)
+        control_image = scribble_image.resize(shape)
+    elif controlnet_type == "seg":
+        seg_image = controlnet_aux.SamDetector.from_pretrained("ybelkada/segment-anything", subfolder="checkpoints")(
+            image
+        )
+        control_image = seg_image.resize(shape)
+    else:
+        raise ValueError(f"There is no demo image of this controlnet_type: {controlnet_type}")
+    return control_image
+
+
+def process_controlnet_arguments(args):
+    assert isinstance(args.controlnet_type, list)
+    assert isinstance(args.controlnet_scale, list)
+    assert isinstance(args.controlnet_image, list)
+    if args.version not in ["1.5", "xl-1.0"]:
+        raise ValueError("This demo only supports ControlNet in Stable Diffusion 1.5 or XL.")
+
+    is_xl = args.version == "xl-1.0"
+    if is_xl and len(args.controlnet_type) > 1:
+        raise ValueError("This demo only support one ControlNet for Stable Diffusion XL.")
+
+    if len(args.controlnet_image) != 0 and len(args.controlnet_image) != len(args.controlnet_scale):
+        raise ValueError(
+            f"Numbers of ControlNets {len(args.controlnet_image)} should be equal to number of ControlNet scales {len(args.controlnet_scale)}."
+        )
+
+    if len(args.controlnet_type) == 0:
+        return None, None
+
+    if len(args.controlnet_scale) == 0:
+        args.controlnet_scale = [0.35 if is_xl else 1.0] * len(args.controlnet_type)
+    elif len(args.controlnet_type) != len(args.controlnet_scale):
+        raise ValueError(
+            f"Numbers of ControlNets {len(args.controlnet_type)} should be equal to number of ControlNet scales {len(args.controlnet_scale)}."
+        )
+
+    # Convert controlnet scales to tensor
+    controlnet_scale = torch.FloatTensor(args.controlnet_scale)
+
+    if is_xl:
+        images = controlnet_demo_images_xl(args)
+    else:
+        images = []
+        if len(args.controlnet_image) > 0:
+            for i, image in enumerate(args.controlnet_image):
+                images.append(
+                    process_controlnet_image(args.controlnet_type[i], Image.open(image), args.height, args.width)
+                )
+        else:
+            images = controlnet_demo_images(args.controlnet_type, args.height, args.width)
+
+    return images, controlnet_scale

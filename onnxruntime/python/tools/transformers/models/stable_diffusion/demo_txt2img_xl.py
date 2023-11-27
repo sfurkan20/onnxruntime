@@ -22,7 +22,16 @@
 
 import coloredlogs
 from cuda import cudart
-from demo_utils import arg_parser, get_metadata, init_pipeline, max_batch, parse_arguments, repeat_prompt
+from demo_utils import (
+    add_controlnet_arguments,
+    arg_parser,
+    get_metadata,
+    init_pipeline,
+    max_batch,
+    parse_arguments,
+    process_controlnet_arguments,
+    repeat_prompt,
+)
 from diffusion_models import PipelineInfo
 from engine_builder import EngineType, get_engine_type
 from pipeline_img2img_xl import Img2ImgXLPipeline
@@ -56,7 +65,7 @@ def load_pipelines(args, batch_size):
         max_image_size=max_image_size,
         use_lcm=args.lcm,
         do_classifier_free_guidance=(args.guidance > 1.0),
-        controlnet=None,
+        controlnet=args.controlnet_type,
         lora_weights=args.lora_weights,
         lora_scale=args.lora_scale,
     )
@@ -113,7 +122,9 @@ def load_pipelines(args, batch_size):
     return base, refiner
 
 
-def run_pipelines(args, base, refiner, prompt, negative_prompt, is_warm_up=False):
+def run_pipelines(
+    args, base, refiner, prompt, negative_prompt, controlnet_image=None, controlnet_scale=None, is_warm_up=False
+):
     image_height = args.height
     image_width = args.width
     batch_size = len(prompt)
@@ -131,6 +142,8 @@ def run_pipelines(args, base, refiner, prompt, negative_prompt, is_warm_up=False
             denoising_steps=args.denoising_steps,
             guidance=args.guidance,
             seed=args.seed,
+            controlnet_images=controlnet_image,
+            controlnet_scales=controlnet_scale,
             return_type="latent" if refiner else "image",
         )
         if refiner is None:
@@ -197,11 +210,11 @@ def run_pipelines(args, base, refiner, prompt, negative_prompt, is_warm_up=False
 
 def run_demo(args):
     """Run Stable Diffusion XL Base + Refiner together (known as ensemble of expert denoisers) to generate an image."""
-
+    controlnet_image, controlnet_scale = process_controlnet_arguments(args)
     prompt, negative_prompt = repeat_prompt(args)
     batch_size = len(prompt)
     base, refiner = load_pipelines(args, batch_size)
-    run_pipelines(args, base, refiner, prompt, negative_prompt)
+    run_pipelines(args, base, refiner, prompt, negative_prompt, controlnet_image, controlnet_scale)
     base.teardown()
     if refiner:
         refiner.teardown()
@@ -295,6 +308,7 @@ if __name__ == "__main__":
     coloredlogs.install(fmt="%(funcName)20s: %(message)s")
 
     parser = arg_parser("Options for Stable Diffusion XL Demo")
+    add_controlnet_arguments(parser)
     args = parse_arguments(is_xl=True, parser=parser)
 
     no_prompt = isinstance(args.prompt, list) and len(args.prompt) == 1 and not args.prompt[0]
