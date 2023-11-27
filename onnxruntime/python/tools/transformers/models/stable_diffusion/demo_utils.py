@@ -423,6 +423,9 @@ def get_depth_image(image):
 
 
 def get_canny_image(image) -> Image.Image:
+    """
+    Create canny image for SDXL control net.
+    """
     image = np.array(image)
     image = cv2.Canny(image, 100, 200)
     image = image[:, :, None]
@@ -430,7 +433,10 @@ def get_canny_image(image) -> Image.Image:
     image = Image.fromarray(image)
 
 
-def controlnet_demo_images_xl(args) -> List[Image.Image]:
+def process_controlnet_images_xl(args) -> List[Image.Image]:
+    """
+    Process control image for SDXL control net.
+    """
     from diffusers.utils import load_image
 
     image = None
@@ -458,10 +464,10 @@ def controlnet_demo_images_xl(args) -> List[Image.Image]:
     return controlnet_images
 
 
-# --------------------------------------------
-# The following are for Control Net for SD 1.5
-# --------------------------------------------
 def add_controlnet_arguments(parser, is_xl: bool = False):
+    """
+    Add control net related arguments.
+    """
     group = parser.add_argument_group("Options for ControlNet (only supports SD 1.5 or XL).")
 
     group.add_argument(
@@ -494,6 +500,9 @@ def download_image(url) -> Image.Image:
 
 
 def controlnet_demo_images(controlnet_list: List[str], height, width) -> List[Image.Image]:
+    """
+    Return demo images of control net v1.1 for Stable Diffusion 1.5.
+    """
     import controlnet_aux
 
     control_images = []
@@ -551,6 +560,9 @@ def controlnet_demo_images(controlnet_list: List[str], height, width) -> List[Im
 
 
 def process_controlnet_image(controlnet_type: str, image: Image.Image, height, width):
+    """
+    Process control images of control net v1.1 for Stable Diffusion 1.5.
+    """
     import controlnet_aux
 
     control_image = None
@@ -585,6 +597,9 @@ def process_controlnet_image(controlnet_type: str, image: Image.Image, height, w
 
 
 def process_controlnet_arguments(args):
+    """
+    Process control net arguments, and returns a list of control images and a tensor of control net scales.
+    """
     assert isinstance(args.controlnet_type, list)
     assert isinstance(args.controlnet_scale, list)
     assert isinstance(args.controlnet_image, list)
@@ -614,7 +629,7 @@ def process_controlnet_arguments(args):
     controlnet_scale = torch.FloatTensor(args.controlnet_scale)
 
     if is_xl:
-        images = controlnet_demo_images_xl(args)
+        images = process_controlnet_images_xl(args)
     else:
         images = []
         if len(args.controlnet_image) > 0:
