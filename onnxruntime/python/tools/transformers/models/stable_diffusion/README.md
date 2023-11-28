@@ -96,7 +96,7 @@ python3 demo_txt2img_xl.py --lcm --disable-refiner "an astronaut riding a rainbo
 ```
 python3 demo_txt2img.py "Stormtrooper's lecture in beautiful lecture hall" --controlnet-type depth --controlnet-scale 1.0
 
-python3 demo_txt2img_xl.py "Stormtrooper's lecture in beautiful lecture hall" --controlnet-type depth --controlnet-scale 0.35 --scheduler UniPC --denoising-steps 16 --guidance 7.0 --disable-refiner
+python3 demo_txt2img_xl.py "young Mona Lisa" --controlnet-type canny --controlnet-scale 0.5 --scheduler UniPC --disable-refiner
 ```
 
 ## Optimize Stable Diffusion ONNX models for Hugging Face Diffusers or Optimum

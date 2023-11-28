@@ -431,6 +431,7 @@ def get_canny_image(image) -> Image.Image:
     image = image[:, :, None]
     image = np.concatenate([image, image, image], axis=2)
     image = Image.fromarray(image)
+    return image
 
 
 def process_controlnet_images_xl(args) -> List[Image.Image]:

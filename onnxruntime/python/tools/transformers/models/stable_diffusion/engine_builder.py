@@ -89,12 +89,13 @@ class EngineBuilder:
 
     def get_cached_model_name(self, model_name):
         hash_source = []
-        if model_name in ["unet", "unetxl"] and self.pipeline_info.lora_weights:
+        if model_name in ["clip", "clip2", "unet", "unetxl"] and self.pipeline_info.lora_weights:
             if self.pipeline_info.lora_weights in [
                 "latent-consistency/lcm-lora-sdxl",
                 "latent-consistency/lcm-lora-sdv1-5",
             ]:
-                model_name = model_name + "_lcm-lora"
+                if model_name in ["unet", "unetxl"]:
+                    model_name = model_name + "_lcm-lora"
             else:
                 model_name = model_name + "_lora"
                 hash_source.append(self.pipeline_info.lora_weights)
