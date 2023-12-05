@@ -54,6 +54,8 @@ void InitBeamState(transformers::IBeamSearchState<T>* beam_state,
                    int num_beams,
                    Stream* ort_stream);
 
+std::unique_ptr<transformers::IBeamScorer> CreateBeamScorer(const transformers::IGenerationParameters& parameters, AllocatorPtr& allocator, AllocatorPtr& allocator_cpu, Stream* ort_stream);
+
 template <typename T>
 void InitGreedyState(transformers::IGreedySearchState<T>* greedy_state,
                      gsl::span<int32_t>& sequence_lengths,
@@ -62,7 +64,6 @@ void InitGreedyState(transformers::IGreedySearchState<T>* greedy_state,
 template <typename T>
 Status ProcessLogits(const OrtValue& logits,                                 // logits output of subgraph
                      transformers::IBeamSearchState<T>* beam_state,          // state
-                     transformers::IBeamSearchCpuState* cpu_state,           // state in CPU
                      transformers::ISequences* sequences,                    // sequences
                      AllocatorPtr& allocator,                                // default allocator
                      onnxruntime::concurrency::ThreadPool* thread_pool,      // thread pool (for CPU only)
@@ -148,6 +149,34 @@ Status ExpandBuffer(
     OrtValue& expanded,
     bool only_copy_shape,
     int max_sequence_length = 0);
+
+Status UpdateDecoderCrossQK(
+    int iteration_number,
+    Stream* stream,
+    OrtValue* cross_qks,
+    IAllocatorUniquePtr<float*>& qk_layer_pointers,
+    int num_layers,
+    int cross_qk_layer_head_pair_count,
+    const int* cross_qk_layer_head_pairs,
+    float* cross_qk_buffer_data,
+    int max_length,
+    AllocatorPtr allocator);
+
+Status FinalizeDecoderCrossQK(
+    Stream* stream,
+    int iteration_number,
+    int context_decoding_len,
+    int batch_size,
+    int num_beams,
+    int max_length,
+    int cross_qk_layer_head_pair_count,
+    const int* cross_qk_layer_head_pairs,
+    int frames_of_k,
+    const float* cross_qk_buffer_data,
+    float* cross_qk_output,
+    int num_return_sequences,
+    const int* cache_indir_data,
+    gsl::span<const int32_t> beam_indices);
 
 }  // namespace GenerationCudaDeviceHelper
 }  // namespace contrib

@@ -203,7 +203,8 @@ TEST(InternalTestingEP, TestMixOfStaticAndCompiledKernels) {
 }
 
 TEST(InternalTestingEP, TestNhwcConversionOfStaticKernels) {
-  const ORTCHAR_T* ort_model_path = ORT_MODEL_FOLDER "squeezenet/model.onnx";
+  // the internal NHWC domain supports opset 11 and later
+  const ORTCHAR_T* ort_model_path = ORT_MODEL_FOLDER "squeezenet/model_opset11.onnx";
 
   SessionOptions so;
   // set this if you want to manually inspect the optimized model
@@ -297,7 +298,7 @@ TEST(InternalTestingEP, TestLoadOrtModel) {
   ExecuteMnist(*session, enable_custom_ep);
 }
 
-// test that is the custom EP cannot take all nodes due to device limitations
+// test that if the custom EP cannot take all nodes due to device limitations
 // that we fallback to the CPU implementations and can execute the model
 TEST(InternalTestingEP, TestLoadOrtModelWithReducedOpCoverage) {
   const ORTCHAR_T* ort_model_path = ORT_MODEL_FOLDER "mnist.internal_testing_ep.ort";
@@ -317,7 +318,6 @@ TEST(InternalTestingEP, TestLoadOrtModelWithReducedOpCoverage) {
 
   // the generated op type should have a hash for the model based on the model path
   const std::string expected_op_type_prefix = "InternalTestingEP_9611636968429821767_";
-  int compiled_node_num = 0;
 
   for (const auto& node : graph.Nodes()) {
     EXPECT_EQ(supported_ops.count(node.OpType()), size_t(0))
@@ -325,7 +325,7 @@ TEST(InternalTestingEP, TestLoadOrtModelWithReducedOpCoverage) {
     if (node.GetExecutionProviderType() == utils::kInternalTestingExecutionProvider) {
       EXPECT_STATUS_OK(func_mgr.GetFuncs(node.Name(), compute_func));
       EXPECT_NE(compute_func, nullptr);
-      EXPECT_EQ(node.OpType(), expected_op_type_prefix + std::to_string(compiled_node_num++));
+      EXPECT_THAT(node.OpType(), ::testing::StartsWith(expected_op_type_prefix));
     }
   }
 

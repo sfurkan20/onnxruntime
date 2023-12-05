@@ -82,6 +82,12 @@ using InitBeamStateFunc = std::function<void(
     int num_beams,
     Stream* stream)>;
 
+using CreateBeamScorer = std::function<std::unique_ptr<transformers::IBeamScorer>(
+    const transformers::IGenerationParameters& parameters,
+    AllocatorPtr& allocator,
+    AllocatorPtr& allocator_cpu,
+    Stream* stream)>;
+
 template <typename T>
 using InitGreedyStateFunc = std::function<void(
     transformers::IGreedySearchState<T>* greedy_state,
@@ -92,7 +98,6 @@ template <typename T>
 using ProcessLogitsFunc = std::function<Status(
     const OrtValue& logits,                                 // logits output of subgraph
     transformers::IBeamSearchState<T>* beam_state,          // state
-    transformers::IBeamSearchCpuState* cpu_state,           // state in CPU
     transformers::ISequences* sequences,                    // sequences
     AllocatorPtr& allocator,                                // default allocator
     onnxruntime::concurrency::ThreadPool* thread_pool,      // thread pool (for CPU only)
@@ -199,6 +204,35 @@ using ExpandBufferFunc = std::function<Status(
     OrtValue& expanded,
     bool only_copy_shape,
     int max_sequence_length)>;
+
+using UpdateDecoderCrossQKFunc = std::function<Status(
+    int iteration_number,
+    Stream* stream,
+    OrtValue* cross_qks,
+    IAllocatorUniquePtr<float*>& qk_layer_pointers,
+    int num_layers,
+    int cross_qk_layer_head_pair_count,
+    const int* cross_qk_layer_head_pairs,
+    float* cross_qk_buffer_data,
+    int max_length,
+    AllocatorPtr allocator)>;
+
+using FinalizeDecoderCrossQKFunc = std::function<Status(
+    Stream* stream,
+    int iteration_number,
+    int context_decoding_len,
+    int batch_size,
+    int num_beams,
+    int max_length,
+    int cross_qk_layer_head_pair_count,
+    const int* cross_qk_layer_head_pairs,
+    int frames_of_k,
+    const float* cross_qk_buffer_data,
+    float* cross_qk_output,
+    int num_return_sequences,
+    const int* cache_indir_data,
+    gsl::span<const int32_t> beam_indices)>;
+
 }  // namespace GenerationDeviceHelper
 
 // These are CPU specific device helper implementations
@@ -235,7 +269,6 @@ void InitGreedyState(transformers::IGreedySearchState<T>* greedy_state,
 template <typename T>
 Status ProcessLogits(const OrtValue& logits,                                 // logits output of subgraph
                      transformers::IBeamSearchState<T>* beam_state,          // state
-                     transformers::IBeamSearchCpuState* cpu_state,           // state in CPU
                      transformers::ISequences* sequences,                    // sequences
                      AllocatorPtr& allocator,                                // default allocator
                      onnxruntime::concurrency::ThreadPool* thread_pool,      // thread pool (for CPU only)
@@ -363,6 +396,34 @@ Status ExpandBuffer(
     OrtValue& expanded,
     bool only_copy_shape,
     int max_sequence_length);
+
+Status UpdateDecoderCrossQK(
+    int iteration_number,
+    Stream* stream,
+    OrtValue* cross_qks,
+    IAllocatorUniquePtr<float*>& qk_layer_pointers,
+    int num_layers,
+    int cross_qk_layer_head_pair_count,
+    const int* cross_qk_layer_head_pairs,
+    float* cross_qk_buffer_data,
+    int max_length,
+    AllocatorPtr allocator);
+
+Status FinalizeDecoderCrossQK(
+    Stream* stream,
+    int iteration_number,
+    int context_decoding_len,
+    int batch_size,
+    int num_beams,
+    int max_length,
+    int cross_qk_layer_head_pair_count,
+    const int* cross_qk_layer_head_pairs,
+    int frames_of_k,
+    const float* cross_qk_buffer_data,
+    float* cross_qk_output,
+    int num_return_sequences,
+    const int* cache_indir_data,
+    gsl::span<const int32_t> beam_indices);
 
 }  // namespace GenerationCpuDeviceHelper
 }  // namespace contrib

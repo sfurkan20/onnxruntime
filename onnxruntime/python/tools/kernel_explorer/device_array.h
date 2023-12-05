@@ -51,6 +51,10 @@ class DeviceArray {
     CALL_THROW(MEMCPY(host_, device_.get(), size_ * itemsize_, MEMCPY_DEVICE_TO_HOST));
   }
 
+  void UpdateDeviceArray() {
+    CALL_THROW(MEMCPY(device_.get(), host_, size_ * itemsize_, MEMCPY_HOST_TO_DEVICE));
+  }
+
   void* ptr() const {
     return device_.get();
   }
@@ -58,8 +62,8 @@ class DeviceArray {
  private:
   std::shared_ptr<void> device_;
   void* host_;
-  ssize_t size_;
-  ssize_t itemsize_;
+  py::ssize_t size_;
+  py::ssize_t itemsize_;
 };
 
 }  // namespace onnxruntime

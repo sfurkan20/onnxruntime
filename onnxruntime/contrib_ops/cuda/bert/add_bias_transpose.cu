@@ -287,9 +287,9 @@ __global__ void AddBiasTransposeQKV(int M, const T* input, const T* biases, T* o
     T* k_smem = q_smem + rotary_embedding_dim;
 
     const int half_rotary_dim = rotary_embedding_dim / 2;
-    const int half_idx        = (head_idx) / half_rotary_dim;
-    const int intra_half_idx  = (head_idx) % half_rotary_dim;
-    const int smem_pitch      = half_rotary_dim;
+    const int half_idx = (head_idx) / half_rotary_dim;
+    const int intra_half_idx = (head_idx) % half_rotary_dim;
+    const int smem_pitch = half_rotary_dim;
 
     if (do_rotary) {
       *reinterpret_cast<Vec_t*>(q_smem + half_idx * smem_pitch + intra_half_idx) = q;
@@ -440,7 +440,6 @@ __global__ void AddBiasTransposeQKVLarge(const int head_size, const T* input, co
     h += stride;
   }
 }
-
 
 template <typename T>
 __global__ void AddBiasTransposeCutlass(const T* input, const T* biases, T* output, int v_head_size) {
@@ -641,7 +640,7 @@ void InvokeAddBiasTranspose(
     cudaStream_t stream, const int num_matrices, const int format, const int max_threads_per_block,
     const int batch_size, const int sequence_length, const int num_heads, const int qk_head_size,
     const T* input, const T* biases, T* output, T* qkv_add_bias, const int v_head_size, int total_matrix_count,
-    bool do_rotary = false, int original_past_sequence_length = 0) {
+    bool do_rotary = false, int past_sequence_length = 0) {
   assert(num_heads <= max_threads_per_block);
 
   if (do_rotary) {
@@ -651,11 +650,14 @@ void InvokeAddBiasTranspose(
     if (format != 1 && format != 2 && format != 3) {
       ORT_THROW("format must be 1, 2 or 3 for rotary attention");
     }
+    if (qk_head_size != 64 && qk_head_size != 128) {
+      ORT_THROW("qk_head_size must be 64 or 128 for rotary attention");
+    }
     if (v_head_size != -1 && qk_head_size != v_head_size) {
       ORT_THROW("qk_head_size must be equal to v_head_size for rotary attention");
     }
 
-    const int step = original_past_sequence_length == 0 ? sequence_length : original_past_sequence_length;
+    const int step = past_sequence_length == 0 ? sequence_length : past_sequence_length;
     size_t smem_size = 2 * qk_head_size * sizeof(T);
 
     const dim3 grid(sequence_length, num_heads, batch_size);
@@ -725,7 +727,7 @@ void LaunchAddBiasTranspose(
     cudaStream_t stream, const int num_matrices, const int format, const int max_threads_per_block,
     const int batch_size, const int sequence_length, const int num_heads, const int qk_head_size,
     const half* input, const half* biases, half* output, bool enable_half4, const int v_head_size,
-    half* qkv_add_bias, int total_matrix_count, bool do_rotary, int original_past_sequence_length) {
+    half* qkv_add_bias, int total_matrix_count, bool do_rotary, int past_sequence_length) {
   total_matrix_count = std::max(num_matrices, total_matrix_count);
   if (enable_half4 && 0 == (qk_head_size % 4) && (v_head_size == -1 || 0 == (v_head_size % 4)) && !do_rotary) {
     const int H = qk_head_size / 4;
@@ -751,7 +753,7 @@ void LaunchAddBiasTranspose(
     InvokeAddBiasTranspose<half>(
         stream, num_matrices, format, max_threads_per_block,
         batch_size, sequence_length, num_heads, qk_head_size, input, biases, output,
-        qkv_add_bias, v_head_size, total_matrix_count, do_rotary, original_past_sequence_length);
+        qkv_add_bias, v_head_size, total_matrix_count, do_rotary, past_sequence_length);
   }
 }
 
@@ -761,7 +763,7 @@ void LaunchAddBiasTranspose(
     const int batch_size, const int sequence_length, const int num_heads, const int qk_head_size,
     const float* input, const float* biases, float* output, bool /*enable_half4*/,
     const int v_head_size, float* qkv_add_bias, int total_matrix_count, bool do_rotary,
-    int original_past_sequence_length) {
+    int past_sequence_length) {
   total_matrix_count = std::max(num_matrices, total_matrix_count);
   if (0 == (qk_head_size % 4) && (v_head_size == -1 || 0 == (v_head_size % 4)) && !do_rotary) {
     const int H = qk_head_size / 4;
@@ -787,7 +789,7 @@ void LaunchAddBiasTranspose(
     InvokeAddBiasTranspose<float>(
         stream, num_matrices, format, max_threads_per_block,
         batch_size, sequence_length, num_heads, qk_head_size, input, biases, output,
-        qkv_add_bias, v_head_size, total_matrix_count, do_rotary, original_past_sequence_length);
+        qkv_add_bias, v_head_size, total_matrix_count, do_rotary, past_sequence_length);
   }
 }
 

@@ -15,7 +15,7 @@ namespace test {
 std::vector<MLFloat16> MakeMLFloat16(const std::initializer_list<float>& input) {
   std::vector<MLFloat16> output;
   std::transform(input.begin(), input.end(), std::back_inserter(output),
-                 [](float fl) { return MLFloat16(math::floatToHalf(fl)); });
+                 [](float fl) { return MLFloat16(fl); });
   return output;
 }
 
@@ -1238,7 +1238,7 @@ TEST(MathOpTest, Sum_8_Test1) {
   // This test runs fine on CPU Plugin
   test.Run(OpTester::ExpectResult::kExpectSuccess, "", {kTensorrtExecutionProvider, kOpenVINOExecutionProvider});
 #else
-  test.Run(OpTester::ExpectResult::kExpectSuccess, "", {kTensorrtExecutionProvider});                    // TensorRT: Expected output shape [{3,3,3}] did not match run output shape [{3,1,1}] for sum
+  test.Run(OpTester::ExpectResult::kExpectSuccess, "", {kTensorrtExecutionProvider});  // TensorRT: Expected output shape [{3,3,3}] did not match run output shape [{3,1,1}] for sum
 #endif
 }
 
@@ -1264,7 +1264,7 @@ TEST(MathOpTest, Sum_8_Test1_double) {
   // This test runs fine on CPU Plugin
   test.Run(OpTester::ExpectResult::kExpectSuccess, "", {kTensorrtExecutionProvider, kOpenVINOExecutionProvider});
 #else
-  test.Run(OpTester::ExpectResult::kExpectSuccess, "", {kTensorrtExecutionProvider});                    // TensorRT: Expected output shape [{3,3,3}] did not match run output shape [{3,1,1}] for sum
+  test.Run(OpTester::ExpectResult::kExpectSuccess, "", {kTensorrtExecutionProvider});  // TensorRT: Expected output shape [{3,3,3}] did not match run output shape [{3,1,1}] for sum
 #endif
 }
 TEST(MathOpTest, Sum_8_Test2) {
@@ -2652,8 +2652,8 @@ void TrigFloat16Test(OpTester& test, std::initializer_list<float> input) {
   std::vector<MLFloat16> float16_input;
   std::vector<MLFloat16> float16_output;
   for (auto v : input) {
-    float16_input.push_back(MLFloat16(math::floatToHalf(v)));
-    float16_output.push_back(MLFloat16(math::floatToHalf(op(v))));
+    float16_input.push_back(MLFloat16(v));
+    float16_output.push_back(MLFloat16(op(v)));
   }
 
   test.AddInput<MLFloat16>("X", dims, float16_input);

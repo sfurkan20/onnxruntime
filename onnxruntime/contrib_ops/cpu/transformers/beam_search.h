@@ -25,11 +25,12 @@ using namespace onnxruntime::controlflow;  // namespace of IControlFlowKernel
 
 class BeamSearch : public IControlFlowKernel {
  public:
-  BeamSearch(const OpKernelInfo& info)
+  BeamSearch(const OpKernelInfo& info, std::unique_ptr<BeamSearchParameters> param = std::make_unique<BeamSearchParameters>())
       : IControlFlowKernel(info),
         encoder_feeds_fetches_manager_(nullptr),
         decoder_feeds_fetches_manager_(nullptr),
         dumper_(nullptr) {
+    parameters_.swap(param);
     Init(info);
   }
 
@@ -53,7 +54,8 @@ class BeamSearch : public IControlFlowKernel {
       const GenerationDeviceHelper::ProcessLogitsFunc<float>& process_logits_func,
       const GenerationDeviceHelper::ProcessLogitsFunc<MLFloat16>& process_logits_fp16_func,
       const GenerationDeviceHelper::InitBeamStateFunc<float>& init_beam_state_func,
-      const GenerationDeviceHelper::InitBeamStateFunc<MLFloat16>& init_beam_state_fp16_func) {
+      const GenerationDeviceHelper::InitBeamStateFunc<MLFloat16>& init_beam_state_fp16_func,
+      const GenerationDeviceHelper::CreateBeamScorer& create_beam_scorer_func) {
     add_to_feeds_func_ = add_to_feeds_func;
     topk_func_ = topk_func;
     device_copy_func_ = device_copy_func;
@@ -62,6 +64,7 @@ class BeamSearch : public IControlFlowKernel {
     process_logits_fp16_func_ = process_logits_fp16_func;
     init_beam_state_func_ = init_beam_state_func;
     init_beam_state_fp16_func_ = init_beam_state_fp16_func;
+    create_beam_scorer_func_ = create_beam_scorer_func;
   }
 
 #ifdef USE_CUDA
@@ -86,12 +89,16 @@ class BeamSearch : public IControlFlowKernel {
       const GenerationDeviceHelper::UpdateDecoderFeedsFunc<MLFloat16>& update_decoder_feeds_fp16_func,
       const GenerationDeviceHelper::ExpandBufferFunc<int32_t>& expand_buffer_int32_func,
       const GenerationDeviceHelper::ExpandBufferFunc<float>& expand_buffer_float_func,
-      const GenerationDeviceHelper::ExpandBufferFunc<MLFloat16>& expand_buffer_float16_func) {
+      const GenerationDeviceHelper::ExpandBufferFunc<MLFloat16>& expand_buffer_float16_func,
+      const GenerationDeviceHelper::UpdateDecoderCrossQKFunc& update_decoder_cross_qk_func,
+      const GenerationDeviceHelper::FinalizeDecoderCrossQKFunc& finalize_decoder_cross_qk_func) {
     update_decoder_feeds_func_ = update_decoder_feeds_func;
     update_decoder_feeds_fp16_func_ = update_decoder_feeds_fp16_func;
     expand_buffer_int32_func_ = expand_buffer_int32_func;
     expand_buffer_float_func_ = expand_buffer_float_func;
     expand_buffer_float16_func_ = expand_buffer_float16_func;
+    update_decoder_cross_qk_func_ = update_decoder_cross_qk_func;
+    finalize_decoder_cross_qk_func_ = finalize_decoder_cross_qk_func;
   }
 
 #ifdef USE_CUDA
@@ -99,7 +106,7 @@ class BeamSearch : public IControlFlowKernel {
   int cuda_device_arch_ = 0;
 #endif
 
- private:
+ protected:
   // Device specific functions
   GenerationDeviceHelper::AddToFeedsFunc add_to_feeds_func_;
   GenerationDeviceHelper::TopkFunc topk_func_;
@@ -111,6 +118,7 @@ class BeamSearch : public IControlFlowKernel {
 
   GenerationDeviceHelper::InitBeamStateFunc<float> init_beam_state_func_;
   GenerationDeviceHelper::InitBeamStateFunc<MLFloat16> init_beam_state_fp16_func_;
+  GenerationDeviceHelper::CreateBeamScorer create_beam_scorer_func_;
 
 #ifdef USE_CUDA
   GenerationDeviceHelper::ReorderPastStateFunc reorder_past_state_func_;
@@ -169,9 +177,21 @@ class BeamSearch : public IControlFlowKernel {
 
   IConsoleDumper* dumper_;
 
-  BeamSearchParameters parameters_;
+  std::unique_ptr<BeamSearchParameters> parameters_;
 
   bool has_init_decoder_ = false;
+
+  GenerationDeviceHelper::UpdateDecoderCrossQKFunc update_decoder_cross_qk_func_;
+
+  GenerationDeviceHelper::FinalizeDecoderCrossQKFunc finalize_decoder_cross_qk_func_;
+};
+
+class WhisperBeamSearch : public BeamSearch {
+ public:
+  WhisperBeamSearch(const OpKernelInfo& info)
+      : BeamSearch(info, std::unique_ptr<BeamSearchParameters>(new WhisperBeamSearchParameters())) {}
+
+  Status Compute(OpKernelContext* ctx) const override;
 };
 
 }  // namespace transformers

@@ -57,6 +57,10 @@
 #include "orttraining/training_ops/cpu/controlflow/yield.h"
 #endif
 
+#ifdef ENABLE_TRITON
+#include "orttraining/training_ops/cpu/triton/triton_op.h"
+#endif
+
 #include "cpu_provider_shared.h"
 
 namespace onnxruntime {
@@ -111,6 +115,12 @@ struct ProviderHostCPUImpl : ProviderHostCPU {
   Status PrepareOutputShape(const Tensor* indices, const int64_t depth_val, const int64_t axis, int64_t& prefix_dim_size, int64_t& suffix_dim_size, TensorShapeVector& output_shape) override { return onnxruntime::PrepareOutputShape(indices, depth_val, axis, prefix_dim_size, suffix_dim_size, output_shape); }
 
   // From cpu/tensor/slice.h (direct)
+  Status SliceBase__FlattenOutputDims(gsl::span<const int64_t> input_dimensions, gsl::span<const int64_t> output_dims,
+                                      TensorShapeVector& starts, TensorShapeVector& ends, TensorShapeVector& steps,
+                                      TensorShapeVector*& p_flattened_input_dims, TensorShapeVector*& p_flattened_output_dims) override {
+    return SliceBase::FlattenOutputDims(input_dimensions, output_dims, starts, ends, steps, p_flattened_input_dims, p_flattened_output_dims);
+  }
+
   Status SliceBase__PrepareForCompute(gsl::span<const int64_t> raw_starts,
                                       gsl::span<const int64_t> raw_ends,
                                       gsl::span<const int64_t> raw_axes,
@@ -235,6 +245,26 @@ struct ProviderHostCPUImpl : ProviderHostCPU {
                                                                             subgraph_session_state);
   }
 
+  Status WhisperBeamSearch__Compute(const contrib::transformers::WhisperBeamSearch* p, OpKernelContext* ctx) override {
+    return p->contrib::transformers::WhisperBeamSearch::Compute(ctx);
+  }
+
+  void BeamSearchParameters__ParseFromAttributes(contrib::transformers::BeamSearchParameters* p, const OpKernelInfo& info) override {
+    p->contrib::transformers::BeamSearchParameters::ParseFromAttributes(info);
+  }
+
+  void GreedySearchParameters__ParseFromAttributes(contrib::transformers::GreedySearchParameters* p, const OpKernelInfo& info) override {
+    p->contrib::transformers::GreedySearchParameters::ParseFromAttributes(info);
+  }
+
+  void SamplingParameters__ParseFromAttributes(contrib::transformers::SamplingParameters* p, const OpKernelInfo& info) override {
+    p->contrib::transformers::SamplingParameters::ParseFromAttributes(info);
+  }
+
+  void WhisperBeamSearchParameters__ParseFromAttributes(contrib::transformers::WhisperBeamSearchParameters* p, const OpKernelInfo& info) override {
+    p->contrib::transformers::WhisperBeamSearchParameters::ParseFromAttributes(info);
+  }
+
   void GreedySearch__Init(contrib::transformers::GreedySearch* p, const OpKernelInfo& info) override {
     p->contrib::transformers::GreedySearch::Init(info);
   }
@@ -300,6 +330,19 @@ struct ProviderHostCPUImpl : ProviderHostCPU {
     return contrib::ExecuteReduceSumATen(p_ctx, axes, keepdims);
   }
 #endif
+
+#ifdef ENABLE_TRITON
+  Status contrib__TritonOp__Compute(const contrib::TritonOp* p, OpKernelContext* context) override {
+    return p->TritonOp::Compute(context);
+  }
+  bool contrib__IsTritonOpExecutorInitialized() override { return contrib::IsTritonOpExecutorInitialized(); }
+  Status contrib__ExecuteTritonOpByFuncName(
+      OpKernelContext* p_ctx, const std::string& func_name, size_t input_count, size_t output_count,
+      const InlinedHashMap<std::string, std::pair<std::string, int>>& kwargs) override {
+    return contrib::ExecuteTritonOpByFuncName(p_ctx, func_name, input_count, output_count, kwargs);
+  }
+#endif
+
 #endif
 };
 #if defined(_MSC_VER) && !defined(__clang__)

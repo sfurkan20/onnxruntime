@@ -95,7 +95,7 @@ SessionState::SessionState(Graph& graph,
     // The allocator registration rule:
     // Each location (OrtDevice) will only have 1 allocator used for whole session.
     // The EP which is registered first will have higher priority
-    for (auto ep : execution_providers_) {
+    for (auto& ep : execution_providers_) {
       auto allocators = ep->CreatePreferredAllocators();
       for (auto& alloc : allocators) {
         allocators_->insert({alloc->Info().device, alloc});  // DONT overwrite existing key
@@ -1030,7 +1030,10 @@ Status SessionState::CreateSubgraphSessionState() {
   for (auto& node : graph_.Nodes()) {
     for (auto& entry : node.GetAttributeNameToMutableSubgraphMap()) {
       const auto& ep = node.GetExecutionProviderType();
-      if (!ep.empty() && ep != kCpuExecutionProvider && ep != kCudaExecutionProvider && ep != kRocmExecutionProvider) {
+      if (!ep.empty() &&
+          ep != kCpuExecutionProvider && ep != kCudaExecutionProvider &&
+          ep != kRocmExecutionProvider && ep != kDmlExecutionProvider &&
+          ep != kJsExecutionProvider) {
         // SessionState is only used when ORT is executing the subgraph. If a non-ORT EP has taken the control flow
         // node containing the subgraph it will create whatever state it needs internally.
         continue;
@@ -1043,7 +1046,8 @@ Status SessionState::CreateSubgraphSessionState() {
       auto subgraph_session_state =
           std::make_unique<SessionState>(*subgraph, execution_providers_,
                                          thread_pool_, inter_op_thread_pool_, data_transfer_mgr_,
-                                         logger_, profiler_, sess_options_, nullptr, allocators_);
+                                         logger_, profiler_, sess_options_,
+                                         prepacked_weights_container_, allocators_);
 
       // Pass fused function manager to subgraph
       subgraph_session_state->fused_funcs_mgr_.SetFusedFuncs(fused_funcs_mgr_);

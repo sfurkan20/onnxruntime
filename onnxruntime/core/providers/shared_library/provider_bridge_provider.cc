@@ -59,6 +59,10 @@
 
 #endif
 
+#ifdef ENABLE_TRITON
+#include "orttraining/training_ops/cpu/triton/triton_op.h"
+#endif
+
 #ifndef _Ret_notnull_
 #define _Ret_notnull_
 #endif
@@ -114,14 +118,6 @@ void CPUAllocator::Free(void* p) { g_host->CPUAllocator__Free(this, p); }
 
 AllocatorPtr CreateAllocator(const AllocatorCreationInfo& info) {
   return g_host->CreateAllocator(info);
-}
-
-void AllocatorManager::InsertAllocator(AllocatorPtr allocator) {
-  return g_host->AllocatorManager__InsertAllocator(this, allocator);
-}
-
-AllocatorPtr AllocatorManager::GetAllocator(OrtMemType mem_type, OrtDevice device) const {
-  return g_host->AllocatorManager__GetAllocator(this, mem_type, device);
 }
 
 template <>
@@ -342,8 +338,8 @@ std::unique_ptr<IAllocator> CreateCUDAAllocator(int16_t device_id, const char* n
   return g_host->CreateCUDAAllocator(device_id, name);
 }
 
-std::unique_ptr<IAllocator> CreateCUDAPinnedAllocator(int16_t device_id, const char* name) {
-  return g_host->CreateCUDAPinnedAllocator(device_id, name);
+std::unique_ptr<IAllocator> CreateCUDAPinnedAllocator(const char* name) {
+  return g_host->CreateCUDAPinnedAllocator(name);
 }
 
 std::unique_ptr<IDataTransfer> CreateGPUDataTransfer() {
@@ -356,8 +352,8 @@ std::unique_ptr<IAllocator> CreateROCMAllocator(int16_t device_id, const char* n
   return g_host->CreateROCMAllocator(device_id, name);
 }
 
-std::unique_ptr<IAllocator> CreateROCMPinnedAllocator(int16_t device_id, const char* name) {
-  return g_host->CreateROCMPinnedAllocator(device_id, name);
+std::unique_ptr<IAllocator> CreateROCMPinnedAllocator(const char* name) {
+  return g_host->CreateROCMPinnedAllocator(name);
 }
 
 std::unique_ptr<IDataTransfer> CreateGPUDataTransfer() {
@@ -464,10 +460,6 @@ Status DenseTensorToSparseCoo(const DataTransferManager& data_manager, const Ten
 
 }  // namespace sparse_utils
 
-float MLFloat16::ToFloat() const {
-  return math::halfToFloat(val);
-}
-
 std::vector<std::string> GetStackTrace() { return g_host->GetStackTrace(); }
 
 void LogRuntimeError(uint32_t session_id, const common::Status& status,
@@ -516,6 +508,13 @@ Status UnsqueezeBase::PrepareCompute(OpKernelContext* ctx, UnsqueezeBase::Prepar
 #if defined(USE_CUDA) || defined(USE_ROCM)
 bool TileOp::IsTileMemcpy(const TensorShape& input_shape, const int64_t* repeats, size_t rank, bool& is_batched_memcpy, size_t& num_of_elements_per_batch, size_t& num_of_copies_per_batch, size_t& num_of_batch_copies) {
   return g_host_cpu.TileOp__IsTileMemcpy(input_shape, repeats, rank, is_batched_memcpy, num_of_elements_per_batch, num_of_copies_per_batch, num_of_batch_copies);
+}
+
+Status SliceBase::FlattenOutputDims(gsl::span<const int64_t> input_dimensions, gsl::span<const int64_t> output_dims,
+                                    TensorShapeVector& starts, TensorShapeVector& ends, TensorShapeVector& steps,
+                                    TensorShapeVector*& p_flattened_input_dims, TensorShapeVector*& p_flattened_output_dims) {
+  return g_host_cpu.SliceBase__FlattenOutputDims(
+      input_dimensions, output_dims, starts, ends, steps, p_flattened_input_dims, p_flattened_output_dims);
 }
 
 Status SliceBase::PrepareForCompute(gsl::span<const int64_t> raw_starts,
@@ -613,6 +612,16 @@ Status BeamSearch::SetupSubgraphExecutionInfo(const SessionState& session_state,
                                               const SessionState& subgraph_session_state) {
   return g_host_cpu.BeamSearch__SetupSubgraphExecutionInfo(this, session_state, attribute_name, subgraph_session_state);
 }
+
+Status WhisperBeamSearch::Compute(OpKernelContext* ctx) const { return g_host_cpu.WhisperBeamSearch__Compute(this, ctx); }
+
+void BeamSearchParameters::ParseFromAttributes(const OpKernelInfo& info) { g_host_cpu.BeamSearchParameters__ParseFromAttributes(this, info); }
+
+void GreedySearchParameters::ParseFromAttributes(const OpKernelInfo& info) { g_host_cpu.GreedySearchParameters__ParseFromAttributes(this, info); }
+
+void SamplingParameters::ParseFromAttributes(const OpKernelInfo& info) { g_host_cpu.SamplingParameters__ParseFromAttributes(this, info); }
+
+void WhisperBeamSearchParameters::ParseFromAttributes(const OpKernelInfo& info) { g_host_cpu.WhisperBeamSearchParameters__ParseFromAttributes(this, info); }
 
 void GreedySearch::Init(const OpKernelInfo& info) { g_host_cpu.GreedySearch__Init(this, info); }
 
@@ -716,6 +725,15 @@ void RefCountTracker::DumpDetails(const std::string& phase_name) const {
 #endif
 
 #endif
+
+#ifdef ENABLE_TRITON
+namespace contrib {
+Status TritonOp::Compute(OpKernelContext* context) const {
+  return g_host_cpu.contrib__TritonOp__Compute(this, context);
+}
+}  // namespace contrib
+#endif
+
 #endif
 
 #if defined(USE_CANN)
