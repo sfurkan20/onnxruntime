@@ -44,7 +44,7 @@ void matmulShapeInference(
     int input1Idx,
     int input2Idx);
 
-void nBitQuantOpsShapeInference(InferenceContext& ctx) {
+void nBitQuantOpsShapeInference(InferenceContext& ctx, size_t qweight_idx=0) {
   auto *final_output_shape =
       ctx.getOutputType(0)->mutable_tensor_type()->mutable_shape();
 
@@ -62,7 +62,7 @@ void nBitQuantOpsShapeInference(InferenceContext& ctx) {
     fail_shape_inference("bits and groupsize must be positive");
   }
 
-  auto qweight_input_shape = ctx.getInputType(0)->tensor_type().shape();
+  auto qweight_input_shape = ctx.getInputType(qweight_idx)->tensor_type().shape();
   if (qweight_input_shape.dim_size() != 2) {
     return;  // Input tensor should have at least two dimensions.
   }
@@ -3497,7 +3497,7 @@ ONNX_CONTRIB_OPERATOR_SCHEMA(QuantNbitsGemm)
       // Type inference
       propagateElemTypeFromInputToOutput(ctx, 0, 0);
       // Shape inference
-      nBitQuantOpsShapeInference(ctx);
+      nBitQuantOpsShapeInference(ctx, 1);
     });
 ONNX_CONTRIB_OPERATOR_SCHEMA(DequantizeAndUnpackWeight)
     .SetDomain(kMSDomain)
