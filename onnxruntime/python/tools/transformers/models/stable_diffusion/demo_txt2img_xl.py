@@ -309,6 +309,32 @@ def run_dynamic_shape_demo(args):
         refiner.teardown()
 
 
+def run_turbo_demo(args):
+    """Run demo of generating images with test prompts with ORT CUDA provider."""
+    args.engine = "ORT_CUDA"
+    args.disable_cuda_graph = True
+    base, refiner = load_pipelines(args, 1)
+
+    from datasets import load_dataset
+
+    dataset = load_dataset("Gustavosta/Stable-Diffusion-Prompts")
+    num_rows = dataset["test"].num_rows
+    batch_size = args.batch_size
+    num_batch = int(num_rows / batch_size)
+    args.batch_size = 1
+    for i in range(num_batch):
+        args.prompt = [dataset["test"][i]["Prompt"] for i in range(i * batch_size, (i + 1) * batch_size)]
+        base.set_scheduler(args.scheduler)
+        if refiner:
+            refiner.set_scheduler(args.refiner_scheduler)
+        prompt, negative_prompt = repeat_prompt(args)
+        run_pipelines(args, base, refiner, prompt, negative_prompt, is_warm_up=False)
+
+    base.teardown()
+    if refiner:
+        refiner.teardown()
+
+
 if __name__ == "__main__":
     coloredlogs.install(fmt="%(funcName)20s: %(message)s")
 
@@ -318,6 +344,9 @@ if __name__ == "__main__":
 
     no_prompt = isinstance(args.prompt, list) and len(args.prompt) == 1 and not args.prompt[0]
     if no_prompt:
-        run_dynamic_shape_demo(args)
+        if args.version == "xl-turbo":
+            run_turbo_demo(args)
+        else:
+            run_dynamic_shape_demo(args)
     else:
         run_demo(args)
