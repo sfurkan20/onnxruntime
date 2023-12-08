@@ -42,7 +42,7 @@ stages:
     buildArch: x64
     msbuildPlatform: arm
     packageName: arm
-    buildparameter: --build_nodejs --arm  --enable_onnx_tests --path_to_protoc_exe $(Build.BinariesDirectory)\RelWithDebInfo\installed\bin\protoc.exe
+    buildparameter: --arm  --enable_onnx_tests --path_to_protoc_exe $(Build.BinariesDirectory)\RelWithDebInfo\installed\bin\protoc.exe
     runTests: false
     buildJava: false
     buildNodejs: true
@@ -81,6 +81,7 @@ stages:
     DoCompliance: false
     DoEsrp: false
     stage_name_suffix: CPU_x86_wcos
+    artifact_name_suffix: wcos
     buildArch: x86
     msbuildPlatform: Win32
     packageName: x86
@@ -95,10 +96,11 @@ stages:
     DoCompliance: false
     DoEsrp: false
     stage_name_suffix: CPU_arm_wcos
+    artifact_name_suffix: wcos
     buildArch: x64
     msbuildPlatform: arm
     packageName: arm
-    buildparameter: --build_nodejs --arm  --enable_onnx_tests --enable_wcos --path_to_protoc_exe $(Build.BinariesDirectory)\RelWithDebInfo\installed\bin\protoc.exe
+    buildparameter: --arm  --enable_onnx_tests --enable_wcos --path_to_protoc_exe $(Build.BinariesDirectory)\RelWithDebInfo\installed\bin\protoc.exe
     runTests: false
     buildJava: false
     buildNodejs: true
@@ -109,6 +111,7 @@ stages:
     DoCompliance: false
     DoEsrp: false
     stage_name_suffix: CPU_arm64_wcos
+    artifact_name_suffix: wcos
     buildArch: x64
     msbuildPlatform: arm64
     packageName: arm64
@@ -123,6 +126,7 @@ stages:
     DoCompliance: false
     DoEsrp: false
     stage_name_suffix: CPU_x64_wcos
+    artifact_name_suffix: wcos
     buildArch: x64
     msbuildPlatform: x64
     packageName: x64
@@ -137,6 +141,7 @@ stages:
     DoCompliance: false
     DoEsrp: false
     stage_name_suffix: CPU_x86_extension
+    artifact_name_suffix: extension
     buildArch: x86
     msbuildPlatform: Win32
     packageName: x86
@@ -151,10 +156,11 @@ stages:
     DoCompliance: false
     DoEsrp: false
     stage_name_suffix: CPU_arm_extension
+    artifact_name_suffix: extension
     buildArch: x64
     msbuildPlatform: arm
     packageName: arm
-    buildparameter: --build_nodejs --arm --use_extensions  --enable_onnx_tests --path_to_protoc_exe $(Build.BinariesDirectory)\RelWithDebInfo\installed\bin\protoc.exe
+    buildparameter: --arm --use_extensions  --enable_onnx_tests --path_to_protoc_exe $(Build.BinariesDirectory)\RelWithDebInfo\installed\bin\protoc.exe
     runTests: false
     buildJava: false
     buildNodejs: true
@@ -165,6 +171,7 @@ stages:
     DoCompliance: false
     DoEsrp: false
     stage_name_suffix: CPU_arm64_extension
+    artifact_name_suffix: extension
     buildArch: x64
     msbuildPlatform: arm64
     packageName: arm64
@@ -179,6 +186,7 @@ stages:
     DoCompliance: false
     DoEsrp: false
     stage_name_suffix: CPU_x64_extension
+    artifact_name_suffix: extension
     buildArch: x64
     msbuildPlatform: x64
     packageName: x64
